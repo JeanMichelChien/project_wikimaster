@@ -1,0 +1,51 @@
+name: Open WikiMasters Packs
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wikimasters-open-packs
+  cancel-in-progress: false
+
+jobs:
+  open-packs:
+    name: Open available packs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    container:
+      image: mcr.microsoft.com/playwright/python:v1.59.0-noble
+      options: --ipc=host
+    env:
+      ARTIFACT_DIR: artifacts
+      HEADLESS: "1"
+      WIKIMASTERS_EMAIL: ${{ secrets.WIKIMASTERS_EMAIL }}
+      WIKIMASTERS_PASSWORD: ${{ secrets.WIKIMASTERS_PASSWORD }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Python dependencies
+        run: python -m pip install --no-cache-dir -r requirements.txt
+
+      - name: Verify required secrets are configured
+        shell: bash
+        run: |
+          test -n "$WIKIMASTERS_EMAIL"
+          test -n "$WIKIMASTERS_PASSWORD"
+
+      - name: Open WikiMasters packs
+        run: python scripts/open_packs.py
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wikimasters-open-packs-failure
+          path: artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
