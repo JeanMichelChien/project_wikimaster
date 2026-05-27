@@ -25,7 +25,7 @@ The project can run from a GitHub repository using GitHub Actions. It logs into 
 The automation has two layers:
 
 1. **GitHub Actions scheduler**
-   - Runs every hour at minute `17` UTC.
+   - Runs every hour at minute `43` UTC.
    - Can also be started manually from the GitHub Actions tab.
    - Uses the official Playwright Python container: `mcr.microsoft.com/playwright/python:v1.59.0-noble`.
    - Reads `WIKIMASTERS_EMAIL` and `WIKIMASTERS_PASSWORD` from GitHub repository secrets.
@@ -74,7 +74,7 @@ The workflow runs automatically every hour:
 
 ```yaml
 schedule:
-  - cron: "17 * * * *"
+  - cron: "43 * * * *"
 ```
 
 GitHub cron schedules use UTC. The run may start a few minutes late depending on GitHub Actions load.
