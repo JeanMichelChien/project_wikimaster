@@ -27,7 +27,7 @@ jobs:
       WIKIMASTERS_PASSWORD: ${{ secrets.WIKIMASTERS_PASSWORD }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Python dependencies
         run: python -m pip install --no-cache-dir -r requirements.txt
@@ -43,7 +43,7 @@ jobs:
 
       - name: Upload failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wikimasters-open-packs-failure
           path: artifacts/
