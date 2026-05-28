@@ -1,8 +1,8 @@
 # WikiMasters Pack Opener
 
-Python + Playwright automation that opens available WikiMasters card packs on a schedule.
+Python + Playwright automation that opens available WikiMasters card packs from a GitHub Actions workflow triggered by cron-job.org.
 
-The project is intended to run for free from a private GitHub repository using GitHub Actions. It logs into WikiMasters with repository secrets, visits `https://www.wiki-masters.com/pulls`, opens every available pack, waits 5 seconds after clicking `Ouvrir`, then clicks through the right-arrow card navigation until each pack is finished.
+The project is intended to run for free from a private GitHub repository using GitHub Actions as the runner and cron-job.org as the hourly scheduler. It logs into WikiMasters with repository secrets, visits `https://www.wiki-masters.com/pulls`, opens every available pack, waits 5 seconds after clicking `Ouvrir`, then clicks through the right-arrow card navigation until each pack is finished.
 
 ## Project Structure
 
@@ -15,23 +15,28 @@ The project is intended to run for free from a private GitHub repository using G
 └── README.md
 ```
 
-- `.github/workflows/open-wikimasters-packs.yml` defines the hourly GitHub Actions job and the manual run trigger.
+- `.github/workflows/open-wikimasters-packs.yml` defines the manually dispatchable GitHub Actions job.
 - `scripts/open_packs.py` contains the browser automation.
 - `requirements.txt` pins the Python Playwright dependency.
 - `.gitignore` keeps secrets, local environments, logs, and generated artifacts out of git.
 
 ## Architecture
 
-The automation has two layers:
+The automation has three layers:
 
-1. **GitHub Actions scheduler**
-   - Runs every hour at minute `43` UTC.
+1. **cron-job.org scheduler**
+   - Sends an hourly HTTP `POST` request to GitHub's `workflow_dispatch` API.
+   - Uses a limited fine-grained GitHub token with access only to this repository.
+   - Replaces GitHub's native `schedule` trigger, which can be delayed or skipped.
+
+2. **GitHub Actions runner**
+   - Starts when cron-job.org calls `workflow_dispatch`.
    - Can also be started manually from the GitHub Actions tab.
    - Uses the official Playwright Python container: `mcr.microsoft.com/playwright/python:v1.59.0-noble`.
    - Reads `WIKIMASTERS_EMAIL` and `WIKIMASTERS_PASSWORD` from GitHub repository secrets.
    - Uploads screenshots and metadata only when a run fails.
 
-2. **Playwright browser script**
+3. **Playwright browser script**
    - Opens Chromium in headless mode.
    - Navigates to the WikiMasters packs page.
    - Logs in if WikiMasters redirects to the login page.
@@ -44,7 +49,7 @@ The automation has two layers:
 
 Create or use a private GitHub repository for this project.
 
-Add the required secrets:
+Add the WikiMasters login secrets:
 
 ```bash
 gh secret set WIKIMASTERS_EMAIL
@@ -66,18 +71,53 @@ WIKIMASTERS_EMAIL
 WIKIMASTERS_PASSWORD
 ```
 
+Create a fine-grained GitHub token for cron-job.org:
+
+- Repository access: only `JeanMichelChien/project_wikimaster`.
+- Repository permissions: `Actions: Read and write`.
+- Expiration: 90 days, then rotate the token.
+
 ## How To Use
 
-### Run Automatically
+### Run Automatically With cron-job.org
 
-The workflow runs automatically every hour:
+Create one cron-job.org job that calls GitHub's workflow dispatch endpoint.
 
-```yaml
-schedule:
-  - cron: "43 * * * *"
+Recommended schedule:
+
+```text
+Every hour at minute 43
 ```
 
-GitHub cron schedules use UTC. The run may start a few minutes late depending on GitHub Actions load.
+Request URL:
+
+```text
+https://api.github.com/repos/JeanMichelChien/project_wikimaster/actions/workflows/open-wikimasters-packs.yml/dispatches
+```
+
+Request method:
+
+```text
+POST
+```
+
+Headers:
+
+```text
+Authorization: Bearer <YOUR_FINE_GRAINED_GITHUB_TOKEN>
+Accept: application/vnd.github+json
+X-GitHub-Api-Version: 2026-03-10
+Content-Type: application/json
+User-Agent: wikimasters-cron-job
+```
+
+Request body:
+
+```json
+{"ref":"main"}
+```
+
+Any `2xx` GitHub API response should be treated as success. After cron-job.org runs, the GitHub Actions run should appear as `workflow_dispatch`.
 
 ### Run Manually
 
@@ -89,6 +129,12 @@ In GitHub:
 4. Click **Run workflow**.
 
 The run is successful when the job ends green. It is also considered successful if no packs are available.
+
+You can also trigger it with the GitHub CLI:
+
+```bash
+gh workflow run open-wikimasters-packs.yml --ref main
+```
 
 ### Run Locally
 
@@ -142,7 +188,9 @@ Full Playwright traces are intentionally not enabled by default because they can
 - **Secrets missing**: run `gh secret list` and confirm both required secrets exist.
 - **Login fails**: verify the credentials, check for CAPTCHA, 2FA, or email verification, and rotate/update the stored password if needed.
 - **Workflow does not appear**: make sure `.github/workflows/open-wikimasters-packs.yml` is committed and pushed to GitHub.
-- **Hourly job does not run exactly on time**: this is normal for GitHub Actions scheduled workflows.
+- **cron-job.org run succeeds but no GitHub Action appears**: check the fine-grained token permissions, request URL, request body, and `Authorization` header.
+- **GitHub API returns 401 or 403**: rotate the fine-grained token and verify it has `Actions: Read and write` on only this repository.
+- **GitHub API returns 404**: verify the repository owner/name and workflow file name in the URL.
 - **UI changed on WikiMasters**: inspect the failure screenshot artifact and update the Playwright selectors in `scripts/open_packs.py`.
 
 ## Security Notes
@@ -150,4 +198,7 @@ Full Playwright traces are intentionally not enabled by default because they can
 - Keep the repository private.
 - Never commit `.env` files or real credentials.
 - Use GitHub repository secrets for credentials.
+- Store the cron-job.org GitHub token only in cron-job.org.
+- Use a fine-grained token with access only to this repository and only `Actions: Read and write`.
+- Rotate the cron-job.org GitHub token every 90 days.
 - Rotate the WikiMasters password if it has been pasted into chat, logs, terminal history, or any non-secret storage.
