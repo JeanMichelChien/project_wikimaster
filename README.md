@@ -166,6 +166,9 @@ Optional environment variables:
 - `HEADLESS`: defaults to `1`. Set to `0` locally to show the browser.
 - `MAX_PACKS_PER_RUN`: defaults to `10`. Maximum number of packs opened in one run.
 - `MAX_CARD_ADVANCES`: defaults to `20`. Maximum right-arrow clicks attempted per pack.
+- `PACK_OPEN_MAX_WAIT_MS`: defaults to `5000`. Maximum wait for the card counter after clicking `Ouvrir`.
+- `CARD_ADVANCE_DELAY_MS`: defaults to `350`. Delay after each right-arrow click before reading the next card counter.
+- `RIGHT_ARROW_ROLE_TIMEOUT_MS`: defaults to `100`. Short accessibility-selector fallback timeout for the right-arrow button.
 - `ARTIFACT_DIR`: defaults to `artifacts`. Directory for failure screenshots and metadata.
 
 ## Failure Artifacts
