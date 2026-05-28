@@ -24,6 +24,9 @@ PULLS_URL = f"{BASE_URL}/pulls"
 ARTIFACT_DIR = Path(os.environ.get("ARTIFACT_DIR", "artifacts"))
 MAX_PACKS_PER_RUN = int(os.environ.get("MAX_PACKS_PER_RUN", "10"))
 MAX_CARD_ADVANCES = int(os.environ.get("MAX_CARD_ADVANCES", "20"))
+PACK_OPEN_MAX_WAIT_MS = int(os.environ.get("PACK_OPEN_MAX_WAIT_MS", "5_000"))
+CARD_ADVANCE_DELAY_MS = int(os.environ.get("CARD_ADVANCE_DELAY_MS", "350"))
+RIGHT_ARROW_ROLE_TIMEOUT_MS = int(os.environ.get("RIGHT_ARROW_ROLE_TIMEOUT_MS", "100"))
 DEFAULT_TIMEOUT_MS = 12_000
 
 
@@ -81,10 +84,6 @@ def save_failure_artifacts(page: Page | None, reason: str) -> None:
 def settle_page(page: Page) -> None:
     try:
         page.wait_for_load_state("domcontentloaded", timeout=DEFAULT_TIMEOUT_MS)
-    except PlaywrightTimeoutError:
-        pass
-    try:
-        page.wait_for_load_state("networkidle", timeout=5_000)
     except PlaywrightTimeoutError:
         pass
 
@@ -186,20 +185,30 @@ def read_card_counter(page: Page) -> tuple[int, int] | None:
     return int(match.group(1)), int(match.group(2))
 
 
+def wait_for_card_counter(page: Page, timeout_ms: int = PACK_OPEN_MAX_WAIT_MS) -> tuple[int, int] | None:
+    deadline = datetime.now(timezone.utc).timestamp() + timeout_ms / 1_000
+    while datetime.now(timezone.utc).timestamp() < deadline:
+        counter = read_card_counter(page)
+        if counter:
+            return counter
+        page.wait_for_timeout(150)
+    return read_card_counter(page)
+
+
 def click_right_arrow_by_role(page: Page) -> bool:
     locator = get_first_visible(
         [
             page.get_by_role("button", name=re.compile("suivant|next|droite|right|→|›", re.IGNORECASE)),
             page.get_by_label(re.compile("suivant|next|droite|right", re.IGNORECASE)),
         ],
-        timeout_ms=750,
+        timeout_ms=RIGHT_ARROW_ROLE_TIMEOUT_MS,
     )
     if locator is None:
         return False
 
     try:
-        if locator.is_enabled(timeout=750):
-            locator.click(timeout=2_000)
+        if locator.is_enabled(timeout=RIGHT_ARROW_ROLE_TIMEOUT_MS):
+            locator.click(timeout=1_000)
             return True
     except PlaywrightError:
         return False
@@ -269,13 +278,11 @@ def click_right_arrow_by_geometry(page: Page) -> bool:
 
 
 def click_right_arrow(page: Page) -> bool:
-    return click_right_arrow_by_role(page) or click_right_arrow_by_geometry(page)
+    return click_right_arrow_by_geometry(page) or click_right_arrow_by_role(page)
 
 
 def reveal_current_pack(page: Page) -> None:
-    settle_page(page)
-
-    counter = read_card_counter(page)
+    counter = wait_for_card_counter(page)
     if counter:
         log(f"Pack opened. Card {counter[0]}/{counter[1]}.")
     else:
@@ -295,7 +302,7 @@ def reveal_current_pack(page: Page) -> None:
             log("No clickable right arrow found; assuming pack is finished.")
             return
 
-        page.wait_for_timeout(900)
+        page.wait_for_timeout(CARD_ADVANCE_DELAY_MS)
         current_counter = read_card_counter(page)
         if current_counter:
             log(f"Advanced to card {current_counter[0]}/{current_counter[1]}.")
@@ -334,7 +341,6 @@ def open_all_available_packs(page: Page) -> int:
 
         log(f"Opening pack {pack_index} ({read_pack_status(page)}).")
         open_button.click(timeout=5_000)
-        page.wait_for_timeout(5_000)
 
         opened += 1
         reveal_current_pack(page)
