@@ -1,8 +1,6 @@
 name: Open WikiMasters Packs
 
 on:
-  schedule:
-    - cron: "43 * * * *"
   workflow_dispatch:
 
 permissions:
