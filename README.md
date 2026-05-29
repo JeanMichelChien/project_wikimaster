@@ -43,8 +43,9 @@ The automation has three layers:
    - Detects the `Ouvrir` button.
    - Opens all available packs, up to `MAX_PACKS_PER_RUN`.
    - For each pack, waits for the card counter, then advances through cards using the right arrow.
-   - Logs each opened card as `Opened card: <name> ; rarity=<rarity>`.
-   - Writes a GitHub Actions step summary table with card name and rarity.
+   - Logs each opened card as `Opened card: <name> ; rarity=<emoji> <rarity>`.
+   - Writes a GitHub Actions step summary table with card name and emoji-coded rarity.
+   - Rarity emojis are ordered from best to worst: `👑 L`, `🏆 UR`, `💗 SR`, `💜 R`, `🔵 PC`, `⚪ C`.
    - Stops safely if no pack is available, the arrow disappears, the card counter stops changing, or the max click limit is reached.
 
 ## GitHub Setup

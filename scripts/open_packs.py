@@ -29,8 +29,17 @@ PACK_OPEN_MAX_WAIT_MS = int(os.environ.get("PACK_OPEN_MAX_WAIT_MS", "5_000"))
 CARD_ADVANCE_DELAY_MS = int(os.environ.get("CARD_ADVANCE_DELAY_MS", "350"))
 RIGHT_ARROW_ROLE_TIMEOUT_MS = int(os.environ.get("RIGHT_ARROW_ROLE_TIMEOUT_MS", "100"))
 DEFAULT_TIMEOUT_MS = 12_000
-RARITY_PATTERN = re.compile(r"^(UR|SSR|SR|R|C)$", re.IGNORECASE)
+RARITY_PATTERN = re.compile(r"^(L|UR|SR|R|PC|C)$", re.IGNORECASE)
 CARD_COUNTER_PATTERN = re.compile(r"Carte\s+(\d+)\s*/\s*(\d+)", re.IGNORECASE)
+RARITY_EMOJIS = {
+    "L": "👑",
+    "UR": "🏆",
+    "SR": "💗",
+    "R": "💜",
+    "PC": "🔵",
+    "C": "⚪",
+    "unknown": "❔",
+}
 
 
 @dataclass(frozen=True)
@@ -224,6 +233,16 @@ def is_card_title_candidate(line: str) -> bool:
         "marche",
         "marché",
         "profil",
+        "toutes les cartes",
+        "guilde",
+        "amis",
+        "messages",
+        "bataille",
+        "succès",
+        "succes",
+        "classement",
+        "paramètres",
+        "parametres",
         "ouvrir",
         "comment ça marche ?",
         "comment ca marche ?",
@@ -252,7 +271,7 @@ def parse_card_from_text(text: str, counter: tuple[int, int] | None) -> tuple[st
             rarity_index = index
             break
 
-        inline_match = re.match(r"^(UR|SSR|SR|R|C)\s+(.+)$", line, re.IGNORECASE)
+        inline_match = re.match(r"^(L|UR|SR|R|PC|C)\s+(.+)$", line, re.IGNORECASE)
         if inline_match:
             rarity = inline_match.group(1).upper()
             possible_name = inline_match.group(2).strip()
@@ -280,13 +299,93 @@ def parse_card_from_text(text: str, counter: tuple[int, int] | None) -> tuple[st
     return name, rarity
 
 
-def read_visible_card(page: Page, pack_index: int, counter: tuple[int, int] | None) -> CardRecord:
+def read_card_area_text(page: Page) -> str:
     try:
-        body_text = page.locator("body").inner_text(timeout=2_000)
-    except PlaywrightError:
-        body_text = ""
+        return page.evaluate(
+            """
+            () => {
+              const samples = [
+                [0.58, 0.38],
+                [0.58, 0.48],
+                [0.58, 0.58],
+                [0.58, 0.68],
+                [0.52, 0.55],
+                [0.64, 0.55],
+              ];
+              const rarityPattern = /^(L|UR|SR|R|PC|C)$/i;
+              const candidates = [];
 
-    name, rarity = parse_card_from_text(body_text, counter)
+              for (const [xRatio, yRatio] of samples) {
+                let element = document.elementFromPoint(
+                  window.innerWidth * xRatio,
+                  window.innerHeight * yRatio
+                );
+
+                for (let depth = 0; element && depth < 8; depth += 1) {
+                  const rect = element.getBoundingClientRect();
+                  const style = window.getComputedStyle(element);
+                  const text = (element.innerText || '').trim();
+                  const lines = text.split('\\n').map((line) => line.trim()).filter(Boolean);
+                  const hasRarity = lines.some((line) => rarityPattern.test(line));
+
+                  if (
+                    text &&
+                    style.visibility !== 'hidden' &&
+                    style.display !== 'none' &&
+                    rect.left > window.innerWidth * 0.25 &&
+                    rect.width >= 160 &&
+                    rect.height >= 160 &&
+                    rect.width <= 760 &&
+                    rect.height <= 840 &&
+                    lines.length >= 2
+                  ) {
+                    const cardCenterX = rect.left + rect.width / 2;
+                    const cardCenterY = rect.top + rect.height / 2;
+                    const centerPenalty =
+                      Math.abs(cardCenterX - window.innerWidth * 0.58) +
+                      Math.abs(cardCenterY - window.innerHeight * 0.54);
+                    const score =
+                      (hasRarity ? 10000 : 0) +
+                      Math.min(lines.length, 8) * 100 -
+                      centerPenalty;
+                    candidates.push({ text, score });
+                  }
+
+                  element = element.parentElement;
+                }
+              }
+
+              candidates.sort((a, b) => b.score - a.score);
+              return candidates[0]?.text || '';
+            }
+            """
+        )
+    except PlaywrightError:
+        return ""
+
+
+def display_rarity(rarity: str) -> str:
+    normalized = rarity.upper() if rarity != "unknown" else "unknown"
+    emoji = RARITY_EMOJIS.get(normalized, RARITY_EMOJIS["unknown"])
+    return f"{emoji} {normalized}"
+
+
+def read_visible_card(page: Page, pack_index: int, counter: tuple[int, int] | None) -> CardRecord:
+    card_area_text = read_card_area_text(page)
+    name, rarity = parse_card_from_text(card_area_text, counter)
+
+    if name == "unknown" or rarity == "unknown":
+        try:
+            body_text = page.locator("body").inner_text(timeout=2_000)
+        except PlaywrightError:
+            body_text = ""
+
+        fallback_name, fallback_rarity = parse_card_from_text(body_text, counter)
+        if name == "unknown":
+            name = fallback_name
+        if rarity == "unknown":
+            rarity = fallback_rarity
+
     return CardRecord(
         pack=pack_index,
         card=counter[0] if counter else None,
@@ -314,7 +413,7 @@ def log_visible_card(
 
     record = read_visible_card(page, pack_index, counter)
     records.append(record)
-    log(f"Opened card: {record.name} ; rarity={record.rarity}")
+    log(f"Opened card: {record.name} ; rarity={display_rarity(record.rarity)}")
 
 
 def markdown_cell(value: object) -> str:
@@ -343,7 +442,7 @@ def write_card_summary(records: list[CardRecord]) -> None:
                 + " | ".join(
                     [
                         markdown_cell(record.name),
-                        markdown_cell(record.rarity),
+                        markdown_cell(display_rarity(record.rarity)),
                     ]
                 )
                 + " |"
@@ -466,6 +565,7 @@ def reveal_current_pack(page: Page, pack_index: int, records: list[CardRecord]) 
 
     for advance in range(MAX_CARD_ADVANCES):
         counter = read_card_counter(page)
+        log_visible_card(page, pack_index, counter, records, seen_card_numbers)
         if counter and counter[0] >= counter[1]:
             log(f"Finished pack at card {counter[0]}/{counter[1]}.")
             return
