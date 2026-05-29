@@ -2,7 +2,7 @@
 
 Python + Playwright automation that opens available WikiMasters card packs from a GitHub Actions workflow triggered by cron-job.org.
 
-The project can run from a GitHub repository using GitHub Actions as the runner and cron-job.org as the hourly scheduler. It logs into WikiMasters with repository secrets, visits `https://www.wiki-masters.com/pulls`, opens every available pack, waits 5 seconds after clicking `Ouvrir`, then clicks through the right-arrow card navigation until each pack is finished.
+The project can run from a GitHub repository using GitHub Actions as the runner and cron-job.org as the hourly scheduler. It logs into WikiMasters with repository secrets, visits `https://www.wiki-masters.com/pulls`, opens every available pack, waits until the card counter appears, then clicks through the right-arrow card navigation until each pack is finished.
 
 ## Project Structure
 
@@ -42,7 +42,9 @@ The automation has three layers:
    - Logs in if WikiMasters redirects to the login page.
    - Detects the `Ouvrir` button.
    - Opens all available packs, up to `MAX_PACKS_PER_RUN`.
-   - For each pack, waits 5 seconds, then advances through cards using the right arrow.
+   - For each pack, waits for the card counter, then advances through cards using the right arrow.
+   - Logs each opened card as `Opened card: <name> ; rarity=<rarity>`.
+   - Writes a GitHub Actions step summary table with card name and rarity.
    - Stops safely if no pack is available, the arrow disappears, the card counter stops changing, or the max click limit is reached.
 
 ## GitHub Setup

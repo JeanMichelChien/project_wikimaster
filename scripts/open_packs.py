@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -28,6 +29,17 @@ PACK_OPEN_MAX_WAIT_MS = int(os.environ.get("PACK_OPEN_MAX_WAIT_MS", "5_000"))
 CARD_ADVANCE_DELAY_MS = int(os.environ.get("CARD_ADVANCE_DELAY_MS", "350"))
 RIGHT_ARROW_ROLE_TIMEOUT_MS = int(os.environ.get("RIGHT_ARROW_ROLE_TIMEOUT_MS", "100"))
 DEFAULT_TIMEOUT_MS = 12_000
+RARITY_PATTERN = re.compile(r"^(UR|SSR|SR|R|C)$", re.IGNORECASE)
+CARD_COUNTER_PATTERN = re.compile(r"Carte\s+(\d+)\s*/\s*(\d+)", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class CardRecord:
+    pack: int
+    card: int | None
+    total: int | None
+    name: str
+    rarity: str
 
 
 def log(message: str) -> None:
@@ -178,11 +190,170 @@ def read_card_counter(page: Page) -> tuple[int, int] | None:
     except PlaywrightError:
         return None
 
-    match = re.search(r"Carte\s+(\d+)\s*/\s*(\d+)", body_text, re.IGNORECASE)
+    match = CARD_COUNTER_PATTERN.search(body_text)
     if not match:
         return None
 
     return int(match.group(1)), int(match.group(2))
+
+
+def normalize_visible_lines(text: str) -> list[str]:
+    lines = []
+    for line in text.splitlines():
+        normalized = re.sub(r"\s+", " ", line).strip()
+        if normalized:
+            lines.append(normalized)
+    return lines
+
+
+def is_card_title_candidate(line: str) -> bool:
+    if RARITY_PATTERN.fullmatch(line):
+        return False
+    if CARD_COUNTER_PATTERN.search(line):
+        return False
+    if re.fullmatch(r"[\d\s]+", line):
+        return False
+    if re.search(r"paquets?\s+disponibles?|prochain dans|encore \d+ cartes?", line, re.IGNORECASE):
+        return False
+    if line.lower() in {
+        "wikimasters",
+        "paquets",
+        "collection",
+        "echanges",
+        "échanges",
+        "marche",
+        "marché",
+        "profil",
+        "ouvrir",
+        "comment ça marche ?",
+        "comment ca marche ?",
+    }:
+        return False
+    return True
+
+
+def parse_card_from_text(text: str, counter: tuple[int, int] | None) -> tuple[str, str]:
+    lines = normalize_visible_lines(text)
+    start_index = 0
+    for index, line in enumerate(lines):
+        if CARD_COUNTER_PATTERN.search(line):
+            start_index = index + 1
+            break
+
+    candidate_lines = lines[start_index : start_index + 24]
+    rarity = "unknown"
+    rarity_index: int | None = None
+    name = "unknown"
+
+    for index, line in enumerate(candidate_lines):
+        rarity_match = RARITY_PATTERN.fullmatch(line)
+        if rarity_match:
+            rarity = rarity_match.group(1).upper()
+            rarity_index = index
+            break
+
+        inline_match = re.match(r"^(UR|SSR|SR|R|C)\s+(.+)$", line, re.IGNORECASE)
+        if inline_match:
+            rarity = inline_match.group(1).upper()
+            possible_name = inline_match.group(2).strip()
+            if is_card_title_candidate(possible_name):
+                name = possible_name
+            return name, rarity
+
+    if rarity_index is not None:
+        for line in candidate_lines[rarity_index + 1 :]:
+            if is_card_title_candidate(line):
+                name = line
+                break
+
+        if name == "unknown":
+            for line in reversed(candidate_lines[:rarity_index]):
+                if is_card_title_candidate(line):
+                    name = line
+                    break
+    else:
+        for line in candidate_lines:
+            if is_card_title_candidate(line):
+                name = line
+                break
+
+    return name, rarity
+
+
+def read_visible_card(page: Page, pack_index: int, counter: tuple[int, int] | None) -> CardRecord:
+    try:
+        body_text = page.locator("body").inner_text(timeout=2_000)
+    except PlaywrightError:
+        body_text = ""
+
+    name, rarity = parse_card_from_text(body_text, counter)
+    return CardRecord(
+        pack=pack_index,
+        card=counter[0] if counter else None,
+        total=counter[1] if counter else None,
+        name=name,
+        rarity=rarity,
+    )
+
+
+def log_visible_card(
+    page: Page,
+    pack_index: int,
+    counter: tuple[int, int] | None,
+    records: list[CardRecord],
+    seen_card_numbers: set[int],
+) -> None:
+    if counter and counter[0] in seen_card_numbers:
+        return
+    if counter:
+        seen_card_numbers.add(counter[0])
+    elif -1 in seen_card_numbers:
+        return
+    else:
+        seen_card_numbers.add(-1)
+
+    record = read_visible_card(page, pack_index, counter)
+    records.append(record)
+    log(f"Opened card: {record.name} ; rarity={record.rarity}")
+
+
+def markdown_cell(value: object) -> str:
+    text = "" if value is None else str(value)
+    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ").strip()
+
+
+def write_card_summary(records: list[CardRecord]) -> None:
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary_path:
+        return
+
+    lines = ["", "## WikiMasters Cards Opened", ""]
+    if not records:
+        lines.append("No cards were opened in this run.")
+    else:
+        lines.extend(
+            [
+                "| Name | Rarity |",
+                "|---|---|",
+            ]
+        )
+        for record in records:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        markdown_cell(record.name),
+                        markdown_cell(record.rarity),
+                    ]
+                )
+                + " |"
+            )
+
+    try:
+        with Path(summary_path).open("a", encoding="utf-8") as summary_file:
+            summary_file.write("\n".join(lines) + "\n")
+    except OSError as exc:
+        log(f"Could not write GitHub step summary: {exc}")
 
 
 def wait_for_card_counter(page: Page, timeout_ms: int = PACK_OPEN_MAX_WAIT_MS) -> tuple[int, int] | None:
@@ -281,7 +452,7 @@ def click_right_arrow(page: Page) -> bool:
     return click_right_arrow_by_geometry(page) or click_right_arrow_by_role(page)
 
 
-def reveal_current_pack(page: Page) -> None:
+def reveal_current_pack(page: Page, pack_index: int, records: list[CardRecord]) -> None:
     counter = wait_for_card_counter(page)
     if counter:
         log(f"Pack opened. Card {counter[0]}/{counter[1]}.")
@@ -290,6 +461,8 @@ def reveal_current_pack(page: Page) -> None:
 
     stagnant_clicks = 0
     previous_counter = counter
+    seen_card_numbers: set[int] = set()
+    log_visible_card(page, pack_index, counter, records, seen_card_numbers)
 
     for advance in range(MAX_CARD_ADVANCES):
         counter = read_card_counter(page)
@@ -306,6 +479,7 @@ def reveal_current_pack(page: Page) -> None:
         current_counter = read_card_counter(page)
         if current_counter:
             log(f"Advanced to card {current_counter[0]}/{current_counter[1]}.")
+        log_visible_card(page, pack_index, current_counter, records, seen_card_numbers)
 
         if current_counter == previous_counter:
             stagnant_clicks += 1
@@ -320,7 +494,7 @@ def reveal_current_pack(page: Page) -> None:
     log(f"Reached MAX_CARD_ADVANCES={MAX_CARD_ADVANCES}; stopping this pack.")
 
 
-def open_all_available_packs(page: Page) -> int:
+def open_all_available_packs(page: Page, records: list[CardRecord]) -> int:
     opened = 0
 
     for pack_index in range(1, MAX_PACKS_PER_RUN + 1):
@@ -343,7 +517,7 @@ def open_all_available_packs(page: Page) -> int:
         open_button.click(timeout=5_000)
 
         opened += 1
-        reveal_current_pack(page)
+        reveal_current_pack(page, pack_index, records)
 
     log(f"Reached MAX_PACKS_PER_RUN={MAX_PACKS_PER_RUN}; stopping run.")
     return opened
@@ -353,6 +527,7 @@ def main() -> int:
     email = required_env("WIKIMASTERS_EMAIL")
     password = required_env("WIKIMASTERS_PASSWORD")
     headless = os.environ.get("HEADLESS", "1").lower() not in {"0", "false", "no"}
+    records: list[CardRecord] = []
 
     page: Page | None = None
     with sync_playwright() as playwright:
@@ -368,11 +543,13 @@ def main() -> int:
         try:
             page.goto(PULLS_URL, wait_until="domcontentloaded")
             login_if_needed(page, email, password)
-            opened = open_all_available_packs(page)
+            opened = open_all_available_packs(page, records)
+            write_card_summary(records)
             log(f"Run completed successfully. Packs opened: {opened}.")
             return 0
         except Exception as exc:
             log(f"Run failed: {exc}")
+            write_card_summary(records)
             save_failure_artifacts(page, "wikimasters-open-packs-failure")
             return 1
         finally:
