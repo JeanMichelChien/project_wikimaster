@@ -44,7 +44,7 @@ The automation has three layers:
    - Opens all available packs, up to `MAX_PACKS_PER_RUN`.
    - For each pack, waits for the card counter, then advances through cards using the right arrow.
    - Logs each opened card as `Opened card: <name> ; rarity=<emoji> <rarity>`.
-   - Writes a GitHub Actions step summary table with card name and emoji-coded rarity.
+   - Writes a GitHub Actions step summary table sorted from rarest to most common.
    - Rarity emojis are ordered from best to worst: `👑 L`, `🏆 UR`, `💗 SR`, `💜 R`, `🔵 PC`, `⚪ C`.
    - Stops safely if no pack is available, the arrow disappears, the card counter stops changing, or the max click limit is reached.
 
@@ -171,6 +171,7 @@ Optional environment variables:
 - `MAX_CARD_ADVANCES`: defaults to `20`. Maximum right-arrow clicks attempted per pack.
 - `PACK_OPEN_MAX_WAIT_MS`: defaults to `5000`. Maximum wait for the card counter after clicking `Ouvrir`.
 - `CARD_ADVANCE_DELAY_MS`: defaults to `350`. Delay after each right-arrow click before reading the next card counter.
+- `CARD_DETAILS_MAX_WAIT_MS`: defaults to `1200`. Maximum extra wait for card name and rarity after the card counter appears.
 - `RIGHT_ARROW_ROLE_TIMEOUT_MS`: defaults to `100`. Short accessibility-selector fallback timeout for the right-arrow button.
 - `ARTIFACT_DIR`: defaults to `artifacts`. Directory for failure screenshots and metadata.
 
