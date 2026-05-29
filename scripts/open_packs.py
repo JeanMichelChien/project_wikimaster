@@ -27,10 +27,12 @@ MAX_PACKS_PER_RUN = int(os.environ.get("MAX_PACKS_PER_RUN", "10"))
 MAX_CARD_ADVANCES = int(os.environ.get("MAX_CARD_ADVANCES", "20"))
 PACK_OPEN_MAX_WAIT_MS = int(os.environ.get("PACK_OPEN_MAX_WAIT_MS", "5_000"))
 CARD_ADVANCE_DELAY_MS = int(os.environ.get("CARD_ADVANCE_DELAY_MS", "350"))
+CARD_DETAILS_MAX_WAIT_MS = int(os.environ.get("CARD_DETAILS_MAX_WAIT_MS", "1_200"))
 RIGHT_ARROW_ROLE_TIMEOUT_MS = int(os.environ.get("RIGHT_ARROW_ROLE_TIMEOUT_MS", "100"))
 DEFAULT_TIMEOUT_MS = 12_000
 RARITY_PATTERN = re.compile(r"^(L|UR|SR|R|PC|C)$", re.IGNORECASE)
 CARD_COUNTER_PATTERN = re.compile(r"Carte\s+(\d+)\s*/\s*(\d+)", re.IGNORECASE)
+COUNTER_VALUE_PATTERN = re.compile(r"^\d+\s*/\s*\d+$")
 RARITY_EMOJIS = {
     "L": "👑",
     "UR": "🏆",
@@ -39,6 +41,15 @@ RARITY_EMOJIS = {
     "PC": "🔵",
     "C": "⚪",
     "unknown": "❔",
+}
+RARITY_RANK = {
+    "L": 0,
+    "UR": 1,
+    "SR": 2,
+    "R": 3,
+    "PC": 4,
+    "C": 5,
+    "unknown": 99,
 }
 
 
@@ -216,15 +227,19 @@ def normalize_visible_lines(text: str) -> list[str]:
 
 
 def is_card_title_candidate(line: str) -> bool:
+    normalized = line.lower()
     if RARITY_PATTERN.fullmatch(line):
         return False
     if CARD_COUNTER_PATTERN.search(line):
+        return False
+    if COUNTER_VALUE_PATTERN.fullmatch(line):
         return False
     if re.fullmatch(r"[\d\s]+", line):
         return False
     if re.search(r"paquets?\s+disponibles?|prochain dans|encore \d+ cartes?", line, re.IGNORECASE):
         return False
-    if line.lower() in {
+    if normalized in {
+        "carte",
         "wikimasters",
         "paquets",
         "collection",
@@ -257,6 +272,9 @@ def parse_card_from_text(text: str, counter: tuple[int, int] | None) -> tuple[st
     for index, line in enumerate(lines):
         if CARD_COUNTER_PATTERN.search(line):
             start_index = index + 1
+            break
+        if line.lower() == "carte" and index + 1 < len(lines) and COUNTER_VALUE_PATTERN.fullmatch(lines[index + 1]):
+            start_index = index + 2
             break
 
     candidate_lines = lines[start_index : start_index + 24]
@@ -370,6 +388,15 @@ def display_rarity(rarity: str) -> str:
     return f"{emoji} {normalized}"
 
 
+def rarity_rank(rarity: str) -> int:
+    normalized = rarity.upper() if rarity != "unknown" else "unknown"
+    return RARITY_RANK.get(normalized, RARITY_RANK["unknown"])
+
+
+def needs_card_details_retry(record: CardRecord) -> bool:
+    return record.name == "unknown" or record.name.lower() == "carte" or record.rarity == "unknown"
+
+
 def read_visible_card(page: Page, pack_index: int, counter: tuple[int, int] | None) -> CardRecord:
     card_area_text = read_card_area_text(page)
     name, rarity = parse_card_from_text(card_area_text, counter)
@@ -395,6 +422,15 @@ def read_visible_card(page: Page, pack_index: int, counter: tuple[int, int] | No
     )
 
 
+def wait_for_visible_card(page: Page, pack_index: int, counter: tuple[int, int] | None) -> CardRecord:
+    deadline = datetime.now(timezone.utc).timestamp() + CARD_DETAILS_MAX_WAIT_MS / 1_000
+    record = read_visible_card(page, pack_index, counter)
+    while needs_card_details_retry(record) and datetime.now(timezone.utc).timestamp() < deadline:
+        page.wait_for_timeout(120)
+        record = read_visible_card(page, pack_index, counter)
+    return record
+
+
 def log_visible_card(
     page: Page,
     pack_index: int,
@@ -411,7 +447,7 @@ def log_visible_card(
     else:
         seen_card_numbers.add(-1)
 
-    record = read_visible_card(page, pack_index, counter)
+    record = wait_for_visible_card(page, pack_index, counter)
     records.append(record)
     log(f"Opened card: {record.name} ; rarity={display_rarity(record.rarity)}")
 
@@ -436,7 +472,14 @@ def write_card_summary(records: list[CardRecord]) -> None:
                 "|---|---|",
             ]
         )
-        for record in records:
+        sorted_records = [
+            record
+            for _, record in sorted(
+                enumerate(records),
+                key=lambda item: (rarity_rank(item[1].rarity), item[0]),
+            )
+        ]
+        for record in sorted_records:
             lines.append(
                 "| "
                 + " | ".join(
