@@ -11,6 +11,7 @@ The project can run from a GitHub repository using GitHub Actions as the runner 
 ├── .github/workflows/open-wikimasters-packs.yml
 ├── scripts/open_packs.py
 ├── scripts/tag_collection_cards.py
+├── scripts/sell_shitty_cards.py
 ├── tests/
 ├── requirements.txt
 ├── .gitignore
@@ -20,6 +21,7 @@ The project can run from a GitHub repository using GitHub Actions as the runner 
 - `.github/workflows/open-wikimasters-packs.yml` defines the manually dispatchable GitHub Actions job.
 - `scripts/open_packs.py` contains the browser automation.
 - `scripts/tag_collection_cards.py` scans the collection and tags supported topic cards.
+- `scripts/sell_shitty_cards.py` auctions cards tagged `à bicrave`.
 - `tests/` contains unit tests for non-browser logic.
 - `requirements.txt` pins the Python Playwright dependency.
 - `.gitignore` keeps secrets, local environments, logs, and generated artifacts out of git.
@@ -178,7 +180,7 @@ HEADLESS=1
 
 The tagger is script-only and does not have a GitHub Actions workflow. It logs in with the same `WIKIMASTERS_EMAIL` and `WIKIMASTERS_PASSWORD` environment variables, scans `https://www.wiki-masters.com/collection` once, uses cached Wikipedia metadata, and writes a grouped report to `artifacts/tag_report.md`. It also writes reusable candidates to `artifacts/tag_candidates.json`, so applying after review can skip the full scan.
 
-Dry run is the default and does not change WikiMasters. By default it classifies all supported tags: `plante`, `philo`, `scam`, `train`, and `souterrains`.
+Dry run is the default and does not change WikiMasters. By default it classifies all supported tags: `plante`, `philo`, `scam`, `train`, `souterrains`, and `à bicrave`.
 
 ```bash
 python3 scripts/tag_collection_cards.py
@@ -204,10 +206,40 @@ The final command applies from `artifacts/tag_candidates.json` and only visits c
 python3 scripts/tag_collection_cards.py --apply --tags plante,philo --batch-size 5
 ```
 
+The `à bicrave` tag is intentionally for shitty cards that should be sold. It only matches cards with no other existing tag, rarity `C` or `PC`, and one of these topics: villages/towns, political people, TV shows, movies, sport athletes, or pornographic cards.
+
+```bash
+python3 scripts/tag_collection_cards.py --tags "à bicrave"
+less artifacts/tag_report.md
+python3 scripts/tag_collection_cards.py --apply-candidates --tags "à bicrave" --batch-size 5
+```
+
 For a small local test:
 
 ```bash
 HEADLESS=0 python3 scripts/tag_collection_cards.py --max-cards 50
+```
+
+### Sell Shitty Cards
+
+The seller script uses normal WikiMasters UI interactions. It filters the collection to cards tagged `à bicrave`, opens up to 5 cards per cycle, clicks **Mettre aux enchères**, sets **Mise de départ** to `10` for `C`/`PC` cards and `40` for any manually tagged higher-rarity card, selects **Durée** `10 min`, and clicks **Lancer l'enchère**. After an apply cycle it waits `10` minutes and `10` seconds before trying the next 5 cards.
+
+Dry run is the default:
+
+```bash
+python3 scripts/sell_shitty_cards.py
+```
+
+Launch one real batch of up to 5 auctions:
+
+```bash
+python3 scripts/sell_shitty_cards.py --apply --cycles 1
+```
+
+Launch batches repeatedly until no new `à bicrave` cards remain:
+
+```bash
+python3 scripts/sell_shitty_cards.py --apply
 ```
 
 ## Configuration
@@ -228,14 +260,28 @@ Collection tagger CLI options:
 - `--dry-run`: default. Report candidates without changing tags.
 - `--apply`: apply matching tags through the WikiMasters bulk selection UI.
 - `--apply-candidates`: apply tags from `artifacts/tag_candidates.json` without rescanning the full collection.
-- `--tags`: comma-separated supported tags. Defaults to `plante,philo,scam,train,souterrains`.
+- `--tags`: comma-separated supported tags. Defaults to `plante,philo,scam,train,souterrains,à bicrave`.
 - `--sample-per-tag`: defaults to `10`. Limits rows shown per tag in the report only; it does not limit scanning or applying. Use `0` to show all candidates.
 - `--max-cards`: defaults to `0`, meaning scan all loaded collection cards.
 - `--batch-size`: defaults to `8`.
+- `--max-apply-candidates`: defaults to `0`, meaning apply every candidate for each enabled tag. Use `1` for a single-card live smoke test.
 - `--scroll-delay-ms`, `--selection-delay-ms`, `--batch-delay-ms`, and `--wikipedia-delay-ms`: throttling controls.
 - `--cache-path`: defaults to `artifacts/wikimasters_wikipedia_cache.json`. If that file is missing, the script reuses the legacy `artifacts/plant_wikipedia_cache.json` cache before writing the new cache path.
 - `--report-path`: defaults to `artifacts/tag_report.md`.
 - `--candidate-path`: defaults to `artifacts/tag_candidates.json`.
+
+Seller CLI options:
+
+- `--dry-run`: default. Open candidates and report what would be auctioned without launching auctions.
+- `--apply`: launch auctions through the WikiMasters UI.
+- `--tag`: defaults to `à bicrave`.
+- `--max-cards-per-cycle`: defaults to `5`, and cannot exceed `5`.
+- `--scan-limit`: defaults to `50` tagged cards scanned per cycle.
+- `--cycles`: defaults to `0`, meaning repeat until no new tagged cards remain. Use `--cycles 1` for one batch.
+- `--wait-seconds`: defaults to `610`, which is 10 minutes and 10 seconds.
+- `--start-price`: defaults to `10` for `C`/`PC` cards.
+- `--non-low-rarity-start-price`: defaults to `40` for manually tagged non-`C`/`PC` cards.
+- `--duration`: defaults to `10 min`.
 
 ## Failure Artifacts
 

@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from scripts.env_loader import load_env_file
+from scripts.sell_shitty_cards import starting_price_for_card
 from scripts.tag_collection_cards import (
     CardRecord,
     TagClassification,
@@ -19,18 +20,19 @@ from scripts.tag_collection_cards import (
     parse_bulk_tag_result_text,
     parse_card_lines,
     parse_tags_arg,
+    validate_apply_candidates_for_tag,
     write_candidate_artifact,
 )
 
 
-def make_card(title: str, subtitle: str = "", tags: tuple[str, ...] = ()) -> CardRecord:
+def make_card(title: str, subtitle: str = "", tags: tuple[str, ...] = (), rarity: str = "UR") -> CardRecord:
     return CardRecord(
         key=title.lower().replace(" ", "-"),
         title=title,
         subtitle=subtitle,
-        rarity="UR",
+        rarity=rarity,
         tags=tags,
-        visible_text="\n".join(["UR", title, subtitle, *tags]),
+        visible_text="\n".join([rarity, title, subtitle, *tags]),
     )
 
 
@@ -189,6 +191,7 @@ class TopicClassifierTests(unittest.TestCase):
 
     def test_parse_tags_arg_validates_supported_tags(self) -> None:
         self.assertEqual(parse_tags_arg("plante,philo,plante"), ("plante", "philo"))
+        self.assertEqual(parse_tags_arg("a bicrave"), ("à bicrave",))
         with self.assertRaises(ValueError):
             parse_tags_arg("plante,inconnu")
 
@@ -438,6 +441,83 @@ class TopicClassifierTests(unittest.TestCase):
         self.assert_tag_miss("souterrains", district, district_metadata)
         self.assert_tag_miss("souterrains", engraving)
         self.assert_tag_miss("souterrains", writer)
+
+    def test_a_bicrave_matches_only_low_rarity_untagged_resale_topics(self) -> None:
+        village = make_card("Saint-Cierge-la-Serre", "commune francaise", rarity="C")
+        politician = make_card("Jane Doe", "femme politique canadienne", rarity="PC")
+        tv_show = make_card("Blue Moon (serie televisee)", "serie televisee quebecoise", rarity="C")
+        film = make_card("Le Sud (film, 1983)", "film sorti en 1983", rarity="PC")
+        athlete = make_card("Joey Saputo", "joueur de football canadien", rarity="C")
+        porn_actor = make_card("Example Star", "actrice pornographique", rarity="PC")
+
+        self.assert_tag_match("à bicrave", village)
+        self.assert_tag_match("à bicrave", politician)
+        self.assert_tag_match("à bicrave", tv_show)
+        self.assert_tag_match("à bicrave", film)
+        self.assert_tag_match("à bicrave", athlete)
+        self.assert_tag_match("à bicrave", porn_actor)
+
+    def test_a_bicrave_requires_no_other_tag_and_c_or_pc_rarity(self) -> None:
+        tagged = make_card("Le Sud (film, 1983)", "film sorti en 1983", tags=("cinema",), rarity="C")
+        rare = make_card("Le Sud (film, 1983)", "film sorti en 1983", rarity="R")
+        unrelated = make_card("Gare de Lyon", "gare ferroviaire parisienne", rarity="C")
+
+        self.assert_tag_miss("à bicrave", tagged)
+        self.assert_tag_miss("à bicrave", rare)
+        self.assert_tag_miss("à bicrave", unrelated)
+
+    def test_a_bicrave_apply_guard_rejects_non_low_rarity_candidates(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "only be applied to C/PC"):
+            validate_apply_candidates_for_tag(
+                [make_card("Not Cheap Enough", "film sorti en 1995", rarity="R")],
+                "à bicrave",
+            )
+
+        validate_apply_candidates_for_tag(
+            [
+                make_card("Cheap Town", "commune francaise", rarity="C"),
+                make_card("Cheap Film", "film sorti en 1995", rarity="PC"),
+            ],
+            "à bicrave",
+        )
+
+    def test_seller_uses_higher_price_for_manually_tagged_non_low_rarity_cards(self) -> None:
+        self.assertEqual(starting_price_for_card(make_card("Cheap Film", rarity="PC"), 10, 40), 10)
+        self.assertEqual(starting_price_for_card(make_card("Manual Rare", rarity="R"), 10, 40), 40)
+        self.assertEqual(starting_price_for_card(make_card("Manual Ultra Rare", rarity="UR"), 10, 40), 40)
+
+    def test_a_bicrave_uses_metadata_when_visible_text_is_sparse(self) -> None:
+        card = make_card("Tiny Town", "", rarity="C")
+        metadata = WikipediaMetadata(
+            title="Tiny Town",
+            description="commune rurale francaise",
+            categories=("Commune en France",),
+        )
+
+        self.assert_tag_match("à bicrave", card, metadata)
+
+    def test_a_bicrave_excludes_category_only_false_positives(self) -> None:
+        football_rule = make_card("Loi 9 du football", "loi regissant le football", rarity="PC")
+        football_rule_metadata = WikipediaMetadata(
+            title="Loi 9 du football",
+            categories=("Sportif",),
+        )
+        tunnel = make_card("Tunnel de la Boucle", "tunnel ferroviaire", rarity="PC")
+        tunnel_metadata = WikipediaMetadata(
+            title="Tunnel de la Boucle",
+            extract="Le tunnel se trouve pres d'un bourg.",
+            categories=("Bourg",),
+        )
+        awards = make_card("11e ceremonie des Hong Kong Film Awards", "prix decernes au cinema", rarity="C")
+        awards_metadata = WikipediaMetadata(
+            title="11e ceremonie des Hong Kong Film Awards",
+            extract="La ceremonie recompense des films.",
+            categories=("Film",),
+        )
+
+        self.assert_tag_miss("à bicrave", football_rule, football_rule_metadata)
+        self.assert_tag_miss("à bicrave", tunnel, tunnel_metadata)
+        self.assert_tag_miss("à bicrave", awards, awards_metadata)
 
 
 if __name__ == "__main__":

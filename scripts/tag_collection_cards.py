@@ -59,7 +59,7 @@ DEFAULT_CANDIDATE_PATH = ARTIFACT_DIR / "tag_candidates.json"
 DEFAULT_TIMEOUT_MS = 12_000
 RARITY_PATTERN = re.compile(r"^(L|UR|SR|R|PC|C)$", re.IGNORECASE)
 PAGE_COUNTER_PATTERN = re.compile(r"Page\s+(\d+)\s*/\s*(\d+)", re.IGNORECASE)
-SUPPORTED_TAGS = ("plante", "philo", "scam", "train", "souterrains")
+SUPPORTED_TAGS = ("plante", "philo", "scam", "train", "souterrains", "à bicrave")
 DEFAULT_TAGS = ",".join(SUPPORTED_TAGS)
 
 # Phrase lists are intentionally conservative: each classifier needs central
@@ -464,6 +464,167 @@ UNDERGROUND_NEGATIVE_PHRASES = (
     "femme politique",
 )
 
+BICRAVE_LOW_RARITIES = {"C", "PC"}
+BICRAVE_PLACE_PHRASES = (
+    "commune",
+    "commune francaise",
+    "commune de",
+    "ville",
+    "village",
+    "localite",
+    "municipalite",
+    "bourg",
+)
+BICRAVE_POLITICAL_PERSON_PHRASES = (
+    "homme politique",
+    "femme politique",
+    "personnalite politique",
+    "politicien",
+    "politicienne",
+    "depute",
+    "deputee",
+    "senateur",
+    "senatrice",
+    "ministre",
+    "maire",
+)
+BICRAVE_MEDIA_PHRASES = (
+    "film",
+    "court metrage",
+    "long metrage",
+    "film documentaire",
+    "serie televisee",
+    "emission de television",
+    "emission televisee",
+    "programme televise",
+    "telefilm",
+)
+BICRAVE_ATHLETE_PHRASES = (
+    "sportif",
+    "sportive",
+    "athlete",
+    "footballeur",
+    "footballeuse",
+    "joueur de football",
+    "joueuse de football",
+    "basketteur",
+    "basketteuse",
+    "tennisman",
+    "joueur de tennis",
+    "joueuse de tennis",
+    "cycliste",
+    "nageur",
+    "nageuse",
+    "skieur",
+    "skieuse",
+    "boxeur",
+    "boxeuse",
+    "lutteur",
+    "lutteuse",
+    "rugbyman",
+    "joueur de hockey",
+    "joueur de baseball",
+    "joueur de cricket",
+)
+BICRAVE_PORN_PHRASES = (
+    "pornographique",
+    "acteur pornographique",
+    "actrice pornographique",
+    "pornographie",
+    "star du x",
+)
+BICRAVE_TOPIC_PHRASES = (
+    *BICRAVE_PLACE_PHRASES,
+    *BICRAVE_POLITICAL_PERSON_PHRASES,
+    *BICRAVE_MEDIA_PHRASES,
+    *BICRAVE_ATHLETE_PHRASES,
+    *BICRAVE_PORN_PHRASES,
+)
+BICRAVE_CATEGORY_PHRASES = (
+    "commune",
+    "ville",
+    "village",
+    "localite",
+    "municipalite",
+    "personnalite politique",
+    "homme politique",
+    "femme politique",
+    "depute",
+    "senateur",
+    "ministre",
+    "maire",
+    "film",
+    "serie televisee",
+    "emission de television",
+    "telefilm",
+    "sportif",
+    "sportive",
+    "footballeur",
+    "footballeuse",
+    "basketteur",
+    "tennisman",
+    "cycliste",
+    "acteur pornographique",
+    "actrice pornographique",
+    "pornographique",
+)
+BICRAVE_NON_TARGET_PHRASES = (
+    "loi",
+    "regle",
+    "departement",
+    "region",
+    "province",
+    "district",
+    "canton",
+    "pays",
+    "royaume",
+    "empire",
+    "gare",
+    "station",
+    "pont",
+    "tunnel",
+    "ligne ferroviaire",
+    "parti politique",
+    "organisation politique",
+    "election",
+    "ceremonie",
+    "prix",
+    "awards",
+    "festival",
+    "championnat",
+    "competition",
+    "bataille",
+    "guerre",
+    "album",
+    "chanson",
+    "roman",
+    "livre",
+    "peinture",
+    "tableau",
+    "jeu video",
+    "club sportif",
+    "equipe",
+    "stade",
+)
+BICRAVE_HARD_NEGATIVE_PHRASES = (
+    "loi",
+    "regle",
+    "pont",
+    "tunnel",
+    "parti politique",
+    "organisation politique",
+    "election",
+    "ceremonie",
+    "prix",
+    "awards",
+    "festival",
+    "championnat",
+    "competition",
+    "club sportif",
+    "equipe",
+    "stade",
+)
+
 
 @dataclass(frozen=True)
 class CardRecord:
@@ -596,6 +757,21 @@ def has_target_tag(card: CardRecord, target_tag: str) -> bool:
     wanted = normalized_tag(target_tag)
     visible_lines = [normalized_tag(line) for line in card.visible_text.splitlines()]
     return has_tag(card, target_tag) or wanted in visible_lines
+
+
+def validate_apply_candidates_for_tag(cards: Sequence[CardRecord], target_tag: str) -> None:
+    """Abort before UI mutation if saved candidates violate hard tag invariants."""
+
+    if normalized_tag(target_tag) != normalized_tag("à bicrave"):
+        return
+
+    wrong_rarity = [card for card in cards if card.rarity.upper() not in BICRAVE_LOW_RARITIES]
+    if wrong_rarity:
+        details = ", ".join(f"{card.title} ({card.rarity})" for card in wrong_rarity[:10])
+        raise RuntimeError(
+            "`à bicrave` can only be applied to C/PC cards. "
+            f"Refusing {len(wrong_rarity)} non-C/PC candidate(s): {details}"
+        )
 
 
 def looks_like_stat_line(line: str) -> bool:
@@ -927,12 +1103,82 @@ def classify_souterrains_card(card: CardRecord, metadata: WikipediaMetadata | No
     )
 
 
+def classify_a_bicrave_card(card: CardRecord, metadata: WikipediaMetadata | None = None) -> TagClassification:
+    """Match low-rarity untagged cards that are intentionally marked for resale."""
+
+    score = 0
+    reasons: list[str] = []
+
+    if card.rarity.upper() not in BICRAVE_LOW_RARITIES:
+        reasons.append(f"rarity {card.rarity} is not C/PC")
+        return TagClassification("à bicrave", False, score, unique_reason(reasons, "not low rarity"))
+
+    bicrave_tag = normalized_tag("à bicrave")
+    other_tags = [tag for tag in card.tags if normalized_tag(tag) != bicrave_tag]
+    if other_tags:
+        reasons.append(f"already has another tag: {', '.join(other_tags)}")
+        return TagClassification("à bicrave", False, score, unique_reason(reasons, "already tagged"))
+
+    visible_text = visible_topic_text(card)
+    description_text, extract_text, category_text = metadata_text(metadata)
+    primary_text = " ".join([visible_text, description_text, category_text])
+
+    visible_topic = phrase_matches(visible_text, BICRAVE_TOPIC_PHRASES)
+    description_topic = phrase_matches(description_text, BICRAVE_TOPIC_PHRASES)
+    category_topic = list(
+        dict.fromkeys(
+            phrase_matches(category_text, BICRAVE_CATEGORY_PHRASES)
+            + phrase_matches(category_text, BICRAVE_TOPIC_PHRASES)
+        )
+    )
+    extract_topic = phrase_matches(extract_text, BICRAVE_TOPIC_PHRASES)
+    negative = phrase_matches(primary_text, BICRAVE_NON_TARGET_PHRASES)
+    hard_negative = phrase_matches(primary_text, BICRAVE_HARD_NEGATIVE_PHRASES)
+
+    score += 3
+    reasons.append(f"low rarity: {card.rarity}")
+    reasons.append("no existing tags")
+
+    if visible_topic:
+        score += 10
+        reasons.append(f"visible resale topic: {visible_topic[0]}")
+    if description_topic:
+        score += 8
+        reasons.append(f"Wikipedia description resale topic: {description_topic[0]}")
+    if category_topic:
+        score += 6
+        reasons.append(f"Wikipedia category resale topic: {category_topic[0]}")
+    if extract_topic:
+        score += 1
+        reasons.append(f"Wikipedia extract resale topic: {extract_topic[0]}")
+    if hard_negative:
+        score -= 20
+        reasons.append(f"excluded non-target context: {hard_negative[0]}")
+    elif negative and not (visible_topic or description_topic):
+        score -= 5
+        reasons.append(f"weak category-only non-target context: {negative[0]}")
+
+    primary_evidence = bool(visible_topic or description_topic or (category_topic and extract_topic))
+    is_match = primary_evidence and score >= 9 and not hard_negative
+    return TagClassification(
+        tag="à bicrave",
+        is_match=is_match,
+        score=score,
+        reason=unique_reason(reasons, "no resale-topic evidence found"),
+    )
+
+
 TAG_DEFINITIONS: dict[str, TagDefinition] = {
     "plante": TagDefinition("plante", "actual plant taxa only", classify_plante_card),
     "philo": TagDefinition("philo", "core philosophy people, schools, concepts, works, and institutions", classify_philo_card),
     "scam": TagDefinition("scam", "central scams, fraud cases, Ponzi schemes, fraudsters, and fraudulent organizations", classify_scam_card),
     "train": TagDefinition("train", "train objects only, including trains, locomotives, rolling stock, types, classes, and models", classify_train_card),
     "souterrains": TagDefinition("souterrains", "underground structures and places only", classify_souterrains_card),
+    "à bicrave": TagDefinition(
+        "à bicrave",
+        "untagged C/PC cards in low-value resale topics",
+        classify_a_bicrave_card,
+    ),
 }
 
 
@@ -949,7 +1195,14 @@ def classify_card_for_tag(tag: str, card: CardRecord, metadata: WikipediaMetadat
 def parse_tags_arg(value: str) -> tuple[str, ...]:
     """Parse a comma-separated tag list and reject unsupported tags early."""
 
-    requested = tuple(dict.fromkeys(part.strip() for part in value.split(",") if part.strip()))
+    canonical_by_normalized = {normalize_text(tag): tag for tag in TAG_DEFINITIONS}
+    requested = tuple(
+        dict.fromkeys(
+            canonical_by_normalized.get(normalize_text(part.strip()), part.strip())
+            for part in value.split(",")
+            if part.strip()
+        )
+    )
     if not requested:
         raise ValueError("--tags cannot be empty.")
 
@@ -1819,7 +2072,12 @@ def click_select_mode(page: Page) -> None:
     page.wait_for_timeout(500)
 
 
-def find_card_click_point_by_scrolling(page: Page, card: CardRecord, delay_ms: int) -> dict[str, float] | None:
+def find_card_click_point_by_scrolling(
+    page: Page,
+    card: CardRecord,
+    delay_ms: int,
+    selection_mode: bool = False,
+) -> dict[str, float] | None:
     """Search the current page's scroll container for a card click point."""
 
     reset_collection_scroll(page)
@@ -1827,7 +2085,7 @@ def find_card_click_point_by_scrolling(page: Page, card: CardRecord, delay_ms: i
     stagnant_rounds = 0
 
     while True:
-        point = find_visible_card_click_point(page, card)
+        point = find_visible_card_click_point(page, card, selection_mode=selection_mode)
         if point is not None:
             return point
 
@@ -1844,12 +2102,12 @@ def find_card_click_point_by_scrolling(page: Page, card: CardRecord, delay_ms: i
             stagnant_rounds = 0
 
 
-def find_visible_card_click_point(page: Page, card: CardRecord) -> dict[str, float] | None:
+def find_visible_card_click_point(page: Page, card: CardRecord, selection_mode: bool = False) -> dict[str, float] | None:
     """Find the checkbox/card center used to select one searched card."""
 
     return page.evaluate(
         """
-        ({ title, subtitle }) => {
+        ({ title, subtitle, rarity, selectionMode }) => {
           const normalize = (value) =>
             (value || '')
               .normalize('NFD')
@@ -1859,6 +2117,7 @@ def find_visible_card_click_point(page: Page, card: CardRecord) -> dict[str, flo
               .trim();
           const titleNorm = normalize(title);
           const subtitleNorm = normalize(subtitle);
+          const rarityNorm = normalize(rarity);
           const rarityPattern = /^(L|UR|SR|R|PC|C)$/i;
           const candidates = [];
 
@@ -1880,6 +2139,7 @@ def find_visible_card_click_point(page: Page, card: CardRecord) -> dict[str, flo
 
             const lines = (element.innerText || '').split('\\n').map((line) => normalize(line)).filter(Boolean);
             if (!lines.some((line) => rarityPattern.test(line))) continue;
+            if (rarityNorm && !lines.some((line) => line === rarityNorm)) continue;
             const hasTitle = lines.some((line) => line === titleNorm || line.includes(titleNorm) || titleNorm.includes(line));
             if (!hasTitle) continue;
             const hasSubtitle = !subtitleNorm || lines.some((line) => line === subtitleNorm || line.includes(subtitleNorm));
@@ -1899,25 +2159,32 @@ def find_visible_card_click_point(page: Page, card: CardRecord) -> dict[str, flo
             return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
           }
 
+          if (selectionMode) {
+            return {
+              x: candidate.rect.right - Math.min(18, candidate.rect.width * 0.12),
+              y: candidate.rect.top + Math.min(28, candidate.rect.height * 0.14),
+            };
+          }
+
           return {
             x: candidate.rect.left + candidate.rect.width / 2,
             y: candidate.rect.top + candidate.rect.height / 2,
           };
         }
         """,
-        {"title": card.title, "subtitle": card.subtitle},
+        {"title": card.title, "subtitle": card.subtitle, "rarity": card.rarity, "selectionMode": selection_mode},
     )
 
 
 def select_card(page: Page, card: CardRecord, selection_delay_ms: int) -> None:
     """Scroll the current page, then search if needed, and click a card."""
 
-    point = find_card_click_point_by_scrolling(page, card, selection_delay_ms)
+    point = find_card_click_point_by_scrolling(page, card, selection_delay_ms, selection_mode=True)
     used_filter = False
     if point is None:
         filter_collection(page, card.title, selection_delay_ms)
         used_filter = True
-        point = find_visible_card_click_point(page, card)
+        point = find_visible_card_click_point(page, card, selection_mode=True)
     if point is None:
         page_hint = f" on page {card.page_number}" if card.page_number else ""
         raise RuntimeError(f"Could not find visible card to select{page_hint}: {card.title}")
@@ -2031,6 +2298,8 @@ def click_bulk_tag_menu(page: Page) -> None:
 
 
 def click_tag_option_or_fill(page: Page, target_tag: str) -> None:
+    """Choose an existing tag option or create it from the bulk-tag modal."""
+
     option_pattern = re.compile(rf"^{re.escape(target_tag)}$", re.IGNORECASE)
     option = get_first_visible(
         [
@@ -2060,6 +2329,19 @@ def click_tag_option_or_fill(page: Page, target_tag: str) -> None:
     page.wait_for_timeout(300)
     tag_input.press("Enter")
     page.wait_for_timeout(500)
+
+    create_option = get_first_visible(
+        [
+            page.get_by_role("button", name=re.compile(rf"créer.*{re.escape(target_tag)}|creer.*{re.escape(target_tag)}", re.IGNORECASE)),
+            page.get_by_role("option", name=re.compile(rf"créer.*{re.escape(target_tag)}|creer.*{re.escape(target_tag)}", re.IGNORECASE)),
+            page.get_by_role("menuitem", name=re.compile(rf"créer.*{re.escape(target_tag)}|creer.*{re.escape(target_tag)}", re.IGNORECASE)),
+            page.get_by_text(re.compile(rf"créer.*{re.escape(target_tag)}|creer.*{re.escape(target_tag)}", re.IGNORECASE)),
+        ],
+        timeout_ms=1_000,
+    )
+    if create_option is not None:
+        create_option.click(timeout=3_000)
+        page.wait_for_timeout(700)
 
 
 def read_bulk_tag_result(page: Page) -> BulkTagResult | None:
@@ -2272,6 +2554,7 @@ def apply_tag_batches(
 ) -> list[CardRecord]:
     """Apply one target tag to candidates in small, verified UI batches."""
 
+    validate_apply_candidates_for_tag(cards, target_tag)
     applied: list[CardRecord] = []
     batches = list(iter_page_batches(cards, batch_size))
     for batch_index, (page_number, batch) in enumerate(batches, start=1):
@@ -2433,6 +2716,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sample-per-tag", type=int, default=10, help="Maximum candidates shown per tag in the report. 0 shows all.")
     parser.add_argument("--max-cards", type=int, default=0, help="Maximum cards to scan. 0 means all loaded cards.")
     parser.add_argument("--batch-size", type=int, default=8, help="Cards to select and tag per mutation batch.")
+    parser.add_argument(
+        "--max-apply-candidates",
+        type=int,
+        default=0,
+        help="Maximum candidates to mutate per tag during apply. 0 means all candidates.",
+    )
     parser.add_argument("--scroll-delay-ms", type=int, default=700, help="Delay after each collection scroll.")
     parser.add_argument("--selection-delay-ms", type=int, default=250, help="Delay between selection/search actions.")
     parser.add_argument("--batch-delay-ms", type=int, default=1_500, help="Delay before and after bulk tag application.")
@@ -2466,6 +2755,8 @@ def run(args: argparse.Namespace) -> int:
             raise RuntimeError(str(exc)) from exc
     if args.batch_size < 1:
         raise RuntimeError("--batch-size must be at least 1.")
+    if args.max_apply_candidates < 0:
+        raise RuntimeError("--max-apply-candidates cannot be negative.")
     if args.sample_per_tag < 0:
         raise RuntimeError("--sample-per-tag cannot be negative.")
 
@@ -2502,6 +2793,8 @@ def run(args: argparse.Namespace) -> int:
                 )
                 for tag in enabled_tags:
                     candidates = candidate_artifact.cards_by_tag[tag]
+                    if args.max_apply_candidates:
+                        candidates = candidates[: args.max_apply_candidates]
                     if not candidates:
                         log(f"No saved '{tag}' candidates to apply.")
                         continue
@@ -2563,6 +2856,8 @@ def run(args: argparse.Namespace) -> int:
 
             for tag in enabled_tags:
                 candidates = candidates_by_tag[tag]
+                if args.max_apply_candidates:
+                    candidates = candidates[: args.max_apply_candidates]
                 if not candidates:
                     continue
                 log(f"Applying '{tag}' to {len(candidates)} candidate card(s).")
