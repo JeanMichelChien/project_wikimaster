@@ -13,3 +13,16 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+
+# Local secrets and environment
+
+# OS, editor, and IDE metadata
+.vscode/
+.idea/
+
+# Python/runtime artifacts
+.venv*/
+.deps/
+
+# Logs, local outputs, and notebooks
+.ipynb_checkpoints/
