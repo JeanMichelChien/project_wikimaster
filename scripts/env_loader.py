@@ -1,4 +1,8 @@
-"""Small .env loader for local script runs."""
+"""Small .env loader for local script runs.
+
+The scripts use it before reading credentials so local runs can share the same
+environment variable names as GitHub Actions secrets.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +15,8 @@ ENV_LINE_PATTERN = re.compile(r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 
 
 def parse_env_value(raw_value: str) -> str:
+    """Parse one dotenv value, including simple quoted strings."""
+
     value = raw_value.strip()
     if not value:
         return ""
@@ -31,6 +37,8 @@ def parse_env_value(raw_value: str) -> str:
 
 
 def load_env_file(path: Path, override: bool = False) -> None:
+    """Load KEY=value lines into os.environ without overriding by default."""
+
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:

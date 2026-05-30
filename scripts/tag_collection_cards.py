@@ -1,0 +1,2616 @@
+#!/usr/bin/env python3
+"""Tag WikiMasters collection cards with low-traffic topic etiquettes.
+
+The script logs into WikiMasters, scans the paginated collection once,
+enriches each card with cached French Wikipedia metadata, classifies cards for
+the enabled topic tags, and optionally applies missing tags in small UI batches.
+Dry-run is the default so tuning classifiers cannot accidentally mutate cards.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import sys
+import time
+import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Iterable, Sequence
+
+try:
+    from scripts.env_loader import load_env_file
+except ModuleNotFoundError:
+    from env_loader import load_env_file
+
+try:
+    from playwright.sync_api import (
+        Error as PlaywrightError,
+        Locator,
+        Page,
+        TimeoutError as PlaywrightTimeoutError,
+        sync_playwright,
+    )
+except ImportError:  # Allows pure classifier tests without Playwright installed.
+    PlaywrightError = Exception
+    PlaywrightTimeoutError = TimeoutError
+    Locator = Any
+    Page = Any
+    sync_playwright = None
+
+
+load_env_file(Path(os.environ.get("ENV_FILE", Path(__file__).resolve().parents[1] / ".env")))
+
+BASE_URL = "https://www.wiki-masters.com"
+COLLECTION_URL = f"{BASE_URL}/collection"
+WIKIPEDIA_API_URL = "https://fr.wikipedia.org/w/api.php"
+ARTIFACT_DIR = Path(os.environ.get("ARTIFACT_DIR", "artifacts"))
+DEFAULT_CACHE_PATH = ARTIFACT_DIR / "wikimasters_wikipedia_cache.json"
+LEGACY_CACHE_PATH = ARTIFACT_DIR / "plant_wikipedia_cache.json"
+DEFAULT_REPORT_PATH = ARTIFACT_DIR / "tag_report.md"
+DEFAULT_CANDIDATE_PATH = ARTIFACT_DIR / "tag_candidates.json"
+DEFAULT_TIMEOUT_MS = 12_000
+RARITY_PATTERN = re.compile(r"^(L|UR|SR|R|PC|C)$", re.IGNORECASE)
+PAGE_COUNTER_PATTERN = re.compile(r"Page\s+(\d+)\s*/\s*(\d+)", re.IGNORECASE)
+SUPPORTED_TAGS = ("plante", "philo", "scam", "train", "souterrains")
+DEFAULT_TAGS = ",".join(SUPPORTED_TAGS)
+
+# Phrase lists are intentionally conservative: each classifier needs central
+# article evidence plus tag-specific exclusions to avoid broad keyword matches.
+PLANT_TAXON_PHRASES = (
+    "genre de plantes",
+    "genre de plante",
+    "espece de plantes",
+    "espece de plante",
+    "espece d'arbre",
+    "espece d'arbres",
+    "espece d'orchidee",
+    "espece d'orchidees",
+    "espece de cactus",
+    "espece de plante a fleur",
+    "espece de plantes a fleurs",
+    "famille de plantes",
+    "sous-famille de plantes",
+    "tribu de plantes",
+    "famille botanique",
+    "taxon vegetal",
+    "regne vegetal",
+    "plante a fleurs",
+    "plante herbacee",
+    "plante grimpante",
+    "plante cultivee",
+    "graminee",
+    "poaceae",
+    "fabaceae",
+    "rosaceae",
+    "asteraceae",
+    "orchidee",
+    "fougere",
+    "bryophyte",
+    "angiosperme",
+    "gymnosperme",
+)
+SUPPORTING_PLANT_CONTEXT_PHRASES = (
+    "agriculture",
+    "agricole",
+    "horticulture",
+    "jardinage",
+    "sylviculture",
+    "foret",
+    "forets",
+    "culture agricole",
+    "semence",
+    "semences",
+    "graine",
+    "graines",
+    "feuille",
+    "feuilles",
+    "racine",
+    "racines",
+    "tige",
+    "tiges",
+    "bois",
+    "verger",
+    "vigne",
+    "viticulture",
+)
+PLANT_CATEGORY_SUPPORT_PHRASES = (
+    "plante",
+    "plantes",
+    "plante a fleurs",
+    "vegetal",
+    "vegetaux",
+    "flore",
+    "orchidee",
+    "orchidees",
+    "cactus",
+    "poaceae",
+    "fabaceae",
+    "rosaceae",
+    "asteraceae",
+    "conifere",
+    "fougere",
+    "angiosperme",
+    "gymnosperme",
+)
+NEGATIVE_CONTEXT_PHRASES = (
+    "film",
+    "acteur",
+    "actrice",
+    "ecrivain",
+    "ecrivaine",
+    "roman",
+    "livre",
+    "chanson",
+    "album",
+    "groupe de rock",
+    "homme politique",
+    "femme politique",
+    "commune",
+    "ville",
+    "district",
+    "barrage",
+    "election",
+    "roi",
+    "reine",
+    "football",
+    "mathematique",
+    "maladie",
+    "syndrome",
+    "champignon",
+    "souche",
+    "entreprise",
+    "societe",
+    "langue",
+    "pays",
+    "guerre",
+    "bataille",
+)
+
+PHILO_CORE_PHRASES = (
+    "philosophe",
+    "philosophes",
+    "philosophie",
+    "philosophique",
+    "ecole philosophique",
+    "courant philosophique",
+    "doctrine philosophique",
+    "concept philosophique",
+    "argument philosophique",
+    "probleme philosophique",
+    "oeuvre philosophique",
+    "philosophie politique",
+    "philosophie morale",
+    "philosophie des sciences",
+    "metaphysique",
+    "epistemologie",
+    "ontologie",
+    "phenomenologie",
+    "existentialisme",
+    "stoicisme",
+    "platonisme",
+    "aristotelisme",
+    "utilitarisme",
+    "nihilisme",
+    "dialectique",
+)
+PHILO_CATEGORY_PHRASES = (
+    "philosophe",
+    "philosophes",
+    "concept de philosophie",
+    "courant philosophique",
+    "ecole philosophique",
+    "oeuvre philosophique",
+    "argument philosophique",
+    "institution philosophique",
+    "philosophie morale",
+    "philosophie politique",
+    "philosophie des sciences",
+    "metaphysique",
+    "epistemologie",
+    "ontologie",
+)
+PHILO_NEGATIVE_PHRASES = (
+    "acteur",
+    "actrice",
+    "chanteur",
+    "chanteuse",
+    "footballeur",
+    "football",
+    "homme politique",
+    "femme politique",
+    "roi",
+    "reine",
+    "commune",
+    "ville",
+    "film",
+    "serie televisee",
+    "chanson",
+    "album",
+    "groupe de musique",
+)
+PHILO_NONCENTRAL_BIO_PHRASES = (
+    "mathematicien",
+    "mathematicienne",
+    "chercheur",
+    "chercheuse",
+    "sociologue",
+    "historien",
+    "historienne",
+    "psychologue",
+    "ecrivain",
+    "ecrivaine",
+)
+PHILO_HARD_NEGATIVE_PHRASES = (
+    "acteur",
+    "actrice",
+    "chanteur",
+    "chanteuse",
+    "footballeur",
+    "football",
+    "film",
+    "serie televisee",
+    "chanson",
+    "album",
+    "groupe de musique",
+)
+
+SCAM_STRONG_PHRASES = (
+    "escroquerie",
+    "escroqueries",
+    "escroc",
+    "escrocs",
+    "arnaque",
+    "arnaques",
+    "fraude",
+    "fraudes",
+    "fraudeur",
+    "fraudeurs",
+    "frauduleux",
+    "frauduleuse",
+    "ponzi",
+    "pyramide de ponzi",
+    "chaine de ponzi",
+    "schema de ponzi",
+    "systeme pyramidal",
+    "vente pyramidale",
+    "crime financier",
+    "abus de confiance",
+    "faux en ecriture",
+)
+SCAM_CATEGORY_PHRASES = (
+    "escroquerie",
+    "escroc",
+    "arnaque",
+    "fraude",
+    "fraudeur",
+    "ponzi",
+    "systeme pyramidal",
+    "crime financier",
+    "affaire financiere",
+)
+SCAM_NEGATIVE_PHRASES = (
+    "film",
+    "serie televisee",
+    "roman",
+    "chanson",
+    "album",
+    "jeu video",
+    "meurtre",
+    "assassinat",
+    "guerre",
+    "bataille",
+    "terrorisme",
+    "trafic de drogue",
+    "volcan",
+)
+SCAM_MEDIA_NEGATIVE_PHRASES = (
+    "film",
+    "serie televisee",
+    "roman",
+    "chanson",
+    "album",
+    "jeu video",
+)
+
+TRAIN_OBJECT_PHRASES = (
+    "train",
+    "locomotive",
+    "locomotives",
+    "rame",
+    "rames",
+    "rame automotrice",
+    "automotrice",
+    "automotrices",
+    "autorail",
+    "autorails",
+    "wagon",
+    "wagons",
+    "voiture voyageurs",
+    "materiel roulant",
+    "train a grande vitesse",
+    "train de voyageurs",
+    "train de marchandises",
+    "locomotive a vapeur",
+    "locomotive electrique",
+    "locomotive diesel",
+    "tgv",
+    "shinkansen",
+)
+TRAIN_CATEGORY_PHRASES = (
+    "locomotive",
+    "locomotives",
+    "train",
+    "materiel roulant",
+    "rame automotrice",
+    "autorail",
+    "wagon",
+    "tgv",
+    "shinkansen",
+)
+TRAIN_NEGATIVE_PHRASES = (
+    "gare",
+    "station",
+    "ligne ferroviaire",
+    "ligne de chemin de fer",
+    "voie ferree",
+    "reseau ferroviaire",
+    "compagnie ferroviaire",
+    "entreprise ferroviaire",
+    "societe ferroviaire",
+    "accident ferroviaire",
+    "catastrophe ferroviaire",
+    "film",
+    "peinture",
+    "tableau",
+    "chanson",
+    "album",
+    "roman",
+    "jeu video",
+    "personnage",
+    "acteur",
+    "actrice",
+)
+
+UNDERGROUND_STRUCTURE_PHRASES = (
+    "grotte",
+    "grottes",
+    "caverne",
+    "cavernes",
+    "gouffre",
+    "gouffres",
+    "aven",
+    "avens",
+    "catacombe",
+    "catacombes",
+    "tunnel",
+    "tunnels",
+    "mine",
+    "mines",
+    "bunker",
+    "bunkers",
+    "abri souterrain",
+    "abris souterrains",
+    "passage souterrain",
+    "passages souterrains",
+    "complexe souterrain",
+    "reseau souterrain",
+    "galerie souterraine",
+    "galeries souterraines",
+    "ville souterraine",
+    "souterrain",
+    "souterrains",
+    "cavite",
+    "cavites",
+    "puits de mine",
+)
+UNDERGROUND_CATEGORY_PHRASES = (
+    "grotte",
+    "grottes",
+    "caverne",
+    "catacombes",
+    "tunnel",
+    "tunnels",
+    "mine",
+    "mines",
+    "bunker",
+    "abri souterrain",
+    "ouvrage souterrain",
+    "souterrain",
+    "cavite",
+)
+UNDERGROUND_NEGATIVE_PHRASES = (
+    "film",
+    "serie televisee",
+    "roman",
+    "chanson",
+    "album",
+    "groupe de musique",
+    "gravure",
+    "peinture",
+    "tableau",
+    "musique underground",
+    "culture underground",
+    "presse underground",
+    "bande dessinee underground",
+    "mouvement underground",
+    "gare",
+    "station",
+    "district",
+    "village",
+    "commune",
+    "ligne de metro",
+    "ligne ferroviaire",
+    "operation de secours",
+    "sauvetage",
+    "accident",
+    "catastrophe",
+    "evenement",
+    "edit",
+    "loi",
+    "decret",
+    "ecrivain",
+    "ecrivaine",
+    "acteur",
+    "actrice",
+    "homme politique",
+    "femme politique",
+)
+
+
+@dataclass(frozen=True)
+class CardRecord:
+    """Normalized data extracted from one visible WikiMasters collection card."""
+
+    key: str
+    title: str
+    subtitle: str
+    rarity: str
+    tags: tuple[str, ...]
+    visible_text: str
+    page_number: int | None = None
+    page_total: int | None = None
+
+
+@dataclass(frozen=True)
+class WikipediaMetadata:
+    """Small subset of Wikipedia page data used by the tag classifiers."""
+
+    title: str
+    description: str = ""
+    extract: str = ""
+    categories: tuple[str, ...] = ()
+    missing: bool = False
+
+
+@dataclass(frozen=True)
+class TagClassification:
+    """Classifier result for one card/tag pair."""
+
+    tag: str
+    is_match: bool
+    score: int
+    reason: str
+
+    @property
+    def is_plant_related(self) -> bool:
+        """Compatibility alias for older plant-only tests/imports."""
+        return self.tag == "plante" and self.is_match
+
+
+@dataclass(frozen=True)
+class TagDefinition:
+    """Runtime definition for one supported WikiMasters etiquette."""
+
+    tag: str
+    description: str
+    classifier: Callable[[CardRecord, WikipediaMetadata | None], TagClassification]
+
+
+@dataclass(frozen=True)
+class BulkTagResult:
+    """Parsed result from the WikiMasters bulk-tag modal."""
+
+    tagged: int
+    already_tagged: int
+    raw_text: str
+
+    @property
+    def successful_count(self) -> int:
+        return self.tagged + self.already_tagged
+
+
+@dataclass(frozen=True)
+class CandidateArtifact:
+    """Machine-readable candidates saved after a scan for fast later apply."""
+
+    tags: tuple[str, ...]
+    cards_by_tag: dict[str, list[CardRecord]]
+    classifications: dict[str, dict[str, TagClassification]]
+    cards_scanned: int
+    generated_at: str
+
+
+def log(message: str) -> None:
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    print(f"[{timestamp}] {message}", flush=True)
+
+
+def required_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
+
+def normalize_text(value: str) -> str:
+    """Normalize French UI/API text for stable phrase matching."""
+
+    decomposed = unicodedata.normalize("NFKD", value)
+    ascii_text = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    ascii_text = ascii_text.lower().replace("’", "'")
+    ascii_text = re.sub(r"[^a-z0-9'/ -]+", " ", ascii_text)
+    return re.sub(r"\s+", " ", ascii_text).strip()
+
+
+def phrase_matches(text: str, phrases: Sequence[str]) -> list[str]:
+    """Return configured phrases found as whole normalized tokens."""
+
+    normalized = normalize_text(text)
+    matches: list[str] = []
+    for phrase in phrases:
+        normalized_phrase = normalize_text(phrase)
+        if re.search(rf"(?<![a-z0-9]){re.escape(normalized_phrase)}(?![a-z0-9])", normalized):
+            matches.append(phrase)
+    return matches
+
+
+def looks_like_latin_taxon(value: str) -> bool:
+    """Detect binomial-ish Latin taxon names without catching French titles."""
+
+    normalized = value.strip()
+    if not re.fullmatch(r"[A-Z][a-z-]+(?:\s+[a-z-]+){1,2}", normalized):
+        return False
+    words = normalized.split()
+    french_connectors = {"a", "au", "aux", "de", "des", "du", "en", "et", "la", "le", "les", "sous", "sur"}
+    return not any(word.lower().strip("-") in french_connectors for word in words[1:])
+
+
+def normalized_tag(value: str) -> str:
+    return normalize_text(value).replace(" ", "-")
+
+
+def has_tag(card: CardRecord, target_tag: str) -> bool:
+    wanted = normalized_tag(target_tag)
+    return any(normalized_tag(tag) == wanted for tag in card.tags)
+
+
+def has_target_tag(card: CardRecord, target_tag: str) -> bool:
+    wanted = normalized_tag(target_tag)
+    visible_lines = [normalized_tag(line) for line in card.visible_text.splitlines()]
+    return has_tag(card, target_tag) or wanted in visible_lines
+
+
+def looks_like_stat_line(line: str) -> bool:
+    normalized = line.strip()
+    if not normalized:
+        return True
+    return bool(re.fullmatch(r"[^\w]*\d[\d\s.,]*[^\w]*", normalized))
+
+
+def looks_like_tag_line(line: str) -> bool:
+    normalized = normalize_text(line)
+    if not normalized or looks_like_stat_line(line):
+        return False
+    if RARITY_PATTERN.fullmatch(line):
+        return False
+    if len(line) > 32:
+        return False
+    if re.search(r"[.!?;:]", line):
+        return False
+    if "/" in line:
+        return True
+    return len(normalized.split()) <= 2
+
+
+def parse_card_lines(lines: Sequence[str]) -> CardRecord | None:
+    """Convert raw visible card text lines into a structured card record."""
+
+    clean_lines = [re.sub(r"\s+", " ", line).strip() for line in lines if line and line.strip()]
+    rarity_index = next((index for index, line in enumerate(clean_lines) if RARITY_PATTERN.fullmatch(line)), -1)
+    if rarity_index < 0:
+        return None
+
+    rarity = clean_lines[rarity_index].upper()
+    title = ""
+    subtitle = ""
+    tags: list[str] = []
+    payload = clean_lines[rarity_index + 1 :]
+
+    for line in payload:
+        if looks_like_stat_line(line) or RARITY_PATTERN.fullmatch(line):
+            continue
+        if not title:
+            title = line
+            continue
+        if not subtitle:
+            subtitle = line
+            continue
+        if looks_like_tag_line(line):
+            tags.append(line)
+
+    if not title:
+        return None
+
+    visible_text = "\n".join(clean_lines)
+    key_material = "\0".join([title, subtitle, rarity])
+    key = hashlib.sha1(key_material.encode("utf-8")).hexdigest()[:16]
+    return CardRecord(
+        key=key,
+        title=title,
+        subtitle=subtitle,
+        rarity=rarity,
+        tags=tuple(dict.fromkeys(tags)),
+        visible_text=visible_text,
+    )
+
+
+def visible_topic_text(card: CardRecord) -> str:
+    return f"{card.title} {card.subtitle} {' '.join(card.tags)}"
+
+
+def metadata_text(metadata: WikipediaMetadata | None) -> tuple[str, str, str]:
+    if not metadata or metadata.missing:
+        return "", "", ""
+    return metadata.description, metadata.extract, " ".join(metadata.categories)
+
+
+def unique_reason(reasons: Sequence[str], fallback: str) -> str:
+    return "; ".join(dict.fromkeys(reasons)) or fallback
+
+
+def classify_plante_card(card: CardRecord, metadata: WikipediaMetadata | None = None) -> TagClassification:
+    """Match actual plant taxa, not broad botany or plant-derived topics."""
+
+    visible_text = f"{card.title} {card.subtitle} {' '.join(card.tags)}"
+    category_text = ""
+    description_text = ""
+    extract_text = ""
+    if metadata and not metadata.missing:
+        category_text = " ".join(metadata.categories)
+        description_text = metadata.description
+        extract_text = metadata.extract
+
+    score = 0
+    reasons: list[str] = []
+
+    visible_taxon = phrase_matches(visible_text, PLANT_TAXON_PHRASES)
+    category_taxon = phrase_matches(category_text, PLANT_TAXON_PHRASES)
+    category_support = phrase_matches(category_text, PLANT_CATEGORY_SUPPORT_PHRASES)
+    description_taxon = phrase_matches(description_text, PLANT_TAXON_PHRASES)
+    extract_taxon = phrase_matches(extract_text, PLANT_TAXON_PHRASES)
+    supporting_context = phrase_matches(" ".join([visible_text, description_text, category_text]), SUPPORTING_PLANT_CONTEXT_PHRASES)
+    visible_negative = phrase_matches(visible_text, NEGATIVE_CONTEXT_PHRASES)
+    metadata_negative = phrase_matches(
+        " ".join([metadata.description, card.subtitle]) if metadata else card.subtitle,
+        NEGATIVE_CONTEXT_PHRASES,
+    )
+
+    if visible_taxon:
+        score += 10
+        reasons.append(f"visible plant taxon term: {visible_taxon[0]}")
+    if description_taxon:
+        score += 8
+        reasons.append(f"Wikipedia description plant taxon term: {description_taxon[0]}")
+    if category_taxon:
+        score += 6
+        reasons.append(f"Wikipedia category plant taxon term: {category_taxon[0]}")
+    if extract_taxon:
+        score += 2
+        reasons.append(f"Wikipedia extract plant taxon term: {extract_taxon[0]}")
+    if category_support and (extract_taxon or looks_like_latin_taxon(card.title)):
+        score += 2
+        reasons.append(f"Wikipedia category plant support: {category_support[0]}")
+    if supporting_context and score > 0:
+        score += 1
+        reasons.append(f"supporting plant context: {supporting_context[0]}")
+
+    if visible_negative:
+        score -= 8
+        reasons.append(f"visible non-plant context: {visible_negative[0]}")
+    if metadata_negative:
+        score -= 6
+        reasons.append(f"metadata non-plant context: {metadata_negative[0]}")
+
+    has_taxon_evidence = bool(
+        visible_taxon
+        or description_taxon
+        or extract_taxon
+        or (category_taxon and looks_like_latin_taxon(card.title))
+    )
+    is_match = has_taxon_evidence and score >= 4
+    reason = unique_reason(reasons, "no plant taxon evidence found")
+    return TagClassification(tag="plante", is_match=is_match, score=score, reason=reason)
+
+
+def classify_plant_card(card: CardRecord, metadata: WikipediaMetadata | None = None) -> TagClassification:
+    return classify_plante_card(card, metadata)
+
+
+def classify_philo_card(card: CardRecord, metadata: WikipediaMetadata | None = None) -> TagClassification:
+    """Match core philosophy people, concepts, schools, works, and institutions."""
+
+    visible_text = visible_topic_text(card)
+    description_text, extract_text, category_text = metadata_text(metadata)
+    metadata_primary_text = " ".join([description_text, category_text])
+    score = 0
+    reasons: list[str] = []
+
+    visible_core = phrase_matches(visible_text, PHILO_CORE_PHRASES)
+    description_core = phrase_matches(description_text, PHILO_CORE_PHRASES)
+    category_core = phrase_matches(category_text, PHILO_CATEGORY_PHRASES)
+    extract_core = phrase_matches(extract_text, PHILO_CORE_PHRASES)
+    negative = phrase_matches(" ".join([visible_text, metadata_primary_text]), PHILO_NEGATIVE_PHRASES)
+    hard_negative = phrase_matches(" ".join([visible_text, metadata_primary_text]), PHILO_HARD_NEGATIVE_PHRASES)
+    noncentral_bio = phrase_matches(" ".join([visible_text, description_text]), PHILO_NONCENTRAL_BIO_PHRASES)
+
+    if visible_core:
+        score += 9
+        reasons.append(f"visible philosophy term: {visible_core[0]}")
+    if description_core:
+        score += 8
+        reasons.append(f"Wikipedia description philosophy term: {description_core[0]}")
+    if category_core:
+        score += 7
+        reasons.append(f"Wikipedia category philosophy term: {category_core[0]}")
+    if extract_core:
+        score += 2
+        reasons.append(f"Wikipedia extract philosophy term: {extract_core[0]}")
+    if negative:
+        score -= 5
+        reasons.append(f"non-core philosophy context: {negative[0]}")
+    if noncentral_bio and not (visible_core or description_core):
+        score -= 6
+        reasons.append(f"category-only philosophy on non-central biography: {noncentral_bio[0]}")
+
+    if re.fullmatch(r"\d{3,4} en philosophie", normalize_text(card.title)):
+        score -= 8
+        reasons.append("chronology page rather than core philosophy topic")
+
+    primary_evidence = bool(visible_core or description_core or category_core)
+    is_match = primary_evidence and score >= 6 and not hard_negative
+    return TagClassification(
+        tag="philo",
+        is_match=is_match,
+        score=score,
+        reason=unique_reason(reasons, "no core philosophy evidence found"),
+    )
+
+
+def classify_scam_card(card: CardRecord, metadata: WikipediaMetadata | None = None) -> TagClassification:
+    """Match articles where fraud, scams, or Ponzi-style schemes are central."""
+
+    visible_text = visible_topic_text(card)
+    description_text, extract_text, category_text = metadata_text(metadata)
+    primary_text = " ".join([visible_text, description_text, category_text])
+    score = 0
+    reasons: list[str] = []
+
+    visible_strong = phrase_matches(visible_text, SCAM_STRONG_PHRASES)
+    description_strong = phrase_matches(description_text, SCAM_STRONG_PHRASES)
+    category_strong = list(
+        dict.fromkeys(phrase_matches(category_text, SCAM_CATEGORY_PHRASES) + phrase_matches(category_text, SCAM_STRONG_PHRASES))
+    )
+    extract_strong = phrase_matches(extract_text, SCAM_STRONG_PHRASES)
+    negative = phrase_matches(primary_text, SCAM_NEGATIVE_PHRASES)
+    media_negative = phrase_matches(primary_text, SCAM_MEDIA_NEGATIVE_PHRASES)
+
+    if visible_strong:
+        score += 9
+        reasons.append(f"visible central fraud term: {visible_strong[0]}")
+    if description_strong:
+        score += 8
+        reasons.append(f"Wikipedia description central fraud term: {description_strong[0]}")
+    if category_strong:
+        score += 7
+        reasons.append(f"Wikipedia category central fraud term: {category_strong[0]}")
+    if extract_strong:
+        score += 2
+        reasons.append(f"Wikipedia extract fraud support: {extract_strong[0]}")
+    if negative:
+        score -= 7
+        reasons.append(f"non-scam context: {negative[0]}")
+
+    primary_evidence = bool(visible_strong or description_strong or category_strong)
+    is_match = primary_evidence and score >= 6 and not media_negative
+    return TagClassification(
+        tag="scam",
+        is_match=is_match,
+        score=score,
+        reason=unique_reason(reasons, "no central fraud/scam evidence found"),
+    )
+
+
+def classify_train_card(card: CardRecord, metadata: WikipediaMetadata | None = None) -> TagClassification:
+    """Match train objects only, excluding stations, media, companies, and events."""
+
+    visible_text = visible_topic_text(card)
+    description_text, extract_text, category_text = metadata_text(metadata)
+    primary_text = " ".join([visible_text, description_text, category_text])
+    score = 0
+    reasons: list[str] = []
+
+    visible_object = phrase_matches(visible_text, TRAIN_OBJECT_PHRASES)
+    description_object = phrase_matches(description_text, TRAIN_OBJECT_PHRASES)
+    category_object = list(
+        dict.fromkeys(phrase_matches(category_text, TRAIN_CATEGORY_PHRASES) + phrase_matches(category_text, TRAIN_OBJECT_PHRASES))
+    )
+    extract_object = phrase_matches(extract_text, TRAIN_OBJECT_PHRASES)
+    negative = phrase_matches(primary_text, TRAIN_NEGATIVE_PHRASES)
+
+    if visible_object:
+        score += 10
+        reasons.append(f"visible train object term: {visible_object[0]}")
+    if description_object:
+        score += 8
+        reasons.append(f"Wikipedia description train object term: {description_object[0]}")
+    if category_object:
+        score += 7
+        reasons.append(f"Wikipedia category train object term: {category_object[0]}")
+    if extract_object:
+        score += 2
+        reasons.append(f"Wikipedia extract train object support: {extract_object[0]}")
+    if negative:
+        score -= 10
+        reasons.append(f"excluded non-object train context: {negative[0]}")
+
+    primary_evidence = bool(visible_object or description_object or category_object)
+    is_match = primary_evidence and score >= 6 and not negative
+    return TagClassification(
+        tag="train",
+        is_match=is_match,
+        score=score,
+        reason=unique_reason(reasons, "no train-object evidence found"),
+    )
+
+
+def classify_souterrains_card(card: CardRecord, metadata: WikipediaMetadata | None = None) -> TagClassification:
+    """Match underground structures/places, excluding cultural or metaphorical uses."""
+
+    visible_text = visible_topic_text(card)
+    description_text, extract_text, category_text = metadata_text(metadata)
+    primary_text = " ".join([visible_text, description_text, category_text])
+    score = 0
+    reasons: list[str] = []
+
+    visible_structure = phrase_matches(visible_text, UNDERGROUND_STRUCTURE_PHRASES)
+    description_structure = phrase_matches(description_text, UNDERGROUND_STRUCTURE_PHRASES)
+    category_structure = list(
+        dict.fromkeys(
+            phrase_matches(category_text, UNDERGROUND_CATEGORY_PHRASES)
+            + phrase_matches(category_text, UNDERGROUND_STRUCTURE_PHRASES)
+        )
+    )
+    extract_structure = phrase_matches(extract_text, UNDERGROUND_STRUCTURE_PHRASES)
+    negative = phrase_matches(primary_text, UNDERGROUND_NEGATIVE_PHRASES)
+
+    if visible_structure:
+        score += 10
+        reasons.append(f"visible underground structure term: {visible_structure[0]}")
+    if description_structure:
+        score += 8
+        reasons.append(f"Wikipedia description underground structure term: {description_structure[0]}")
+    if category_structure:
+        score += 7
+        reasons.append(f"Wikipedia category underground structure term: {category_structure[0]}")
+    if extract_structure:
+        score += 2
+        reasons.append(f"Wikipedia extract underground structure support: {extract_structure[0]}")
+    if negative:
+        score -= 10
+        reasons.append(f"excluded non-place underground context: {negative[0]}")
+
+    primary_evidence = bool(visible_structure or description_structure or category_structure)
+    is_match = primary_evidence and score >= 6 and not negative
+    return TagClassification(
+        tag="souterrains",
+        is_match=is_match,
+        score=score,
+        reason=unique_reason(reasons, "no underground structure/place evidence found"),
+    )
+
+
+TAG_DEFINITIONS: dict[str, TagDefinition] = {
+    "plante": TagDefinition("plante", "actual plant taxa only", classify_plante_card),
+    "philo": TagDefinition("philo", "core philosophy people, schools, concepts, works, and institutions", classify_philo_card),
+    "scam": TagDefinition("scam", "central scams, fraud cases, Ponzi schemes, fraudsters, and fraudulent organizations", classify_scam_card),
+    "train": TagDefinition("train", "train objects only, including trains, locomotives, rolling stock, types, classes, and models", classify_train_card),
+    "souterrains": TagDefinition("souterrains", "underground structures and places only", classify_souterrains_card),
+}
+
+
+def classify_card_for_tag(tag: str, card: CardRecord, metadata: WikipediaMetadata | None = None) -> TagClassification:
+    """Dispatch one card to the classifier registered for a supported tag."""
+
+    try:
+        definition = TAG_DEFINITIONS[tag]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported tag: {tag}") from exc
+    return definition.classifier(card, metadata)
+
+
+def parse_tags_arg(value: str) -> tuple[str, ...]:
+    """Parse a comma-separated tag list and reject unsupported tags early."""
+
+    requested = tuple(dict.fromkeys(part.strip() for part in value.split(",") if part.strip()))
+    if not requested:
+        raise ValueError("--tags cannot be empty.")
+
+    unsupported = [tag for tag in requested if tag not in TAG_DEFINITIONS]
+    if unsupported:
+        supported = ", ".join(SUPPORTED_TAGS)
+        raise ValueError(f"Unsupported tag(s): {', '.join(unsupported)}. Supported tags: {supported}.")
+    return requested
+
+
+def parse_bulk_tag_result_text(text: str) -> BulkTagResult | None:
+    """Parse the success counts shown after a bulk etiquette action."""
+
+    normalized = normalize_text(text)
+    tagged_match = re.search(r"(\d+)\s+cartes?\s+etiquetees?", normalized)
+    already_match = re.search(r"(\d+)\s+(?:cartes?\s+)?deja\s+etiquetees?", normalized)
+
+    if not tagged_match and not already_match:
+        return None
+
+    return BulkTagResult(
+        tagged=int(tagged_match.group(1)) if tagged_match else 0,
+        already_tagged=int(already_match.group(1)) if already_match else 0,
+        raw_text=re.sub(r"\s+", " ", text).strip(),
+    )
+
+
+def card_to_json(card: CardRecord) -> dict[str, Any]:
+    return {
+        "key": card.key,
+        "title": card.title,
+        "subtitle": card.subtitle,
+        "rarity": card.rarity,
+        "tags": list(card.tags),
+        "visible_text": card.visible_text,
+        "page_number": card.page_number,
+        "page_total": card.page_total,
+    }
+
+
+def card_from_json(payload: dict[str, Any]) -> CardRecord:
+    return CardRecord(
+        key=str(payload.get("key") or ""),
+        title=str(payload.get("title") or ""),
+        subtitle=str(payload.get("subtitle") or ""),
+        rarity=str(payload.get("rarity") or ""),
+        tags=tuple(str(tag) for tag in payload.get("tags", [])),
+        visible_text=str(payload.get("visible_text") or ""),
+        page_number=int(payload["page_number"]) if payload.get("page_number") is not None else None,
+        page_total=int(payload["page_total"]) if payload.get("page_total") is not None else None,
+    )
+
+
+def build_candidates_by_tag(
+    cards: Sequence[CardRecord],
+    classifications: dict[str, dict[str, TagClassification]],
+    tags: Sequence[str],
+) -> dict[str, list[CardRecord]]:
+    return {
+        tag: [
+            card
+            for card in cards
+            if not has_target_tag(card, tag)
+            and classifications.get(tag, {}).get(card.key, TagClassification(tag, False, 0, "")).is_match
+        ]
+        for tag in tags
+    }
+
+
+def write_candidate_artifact(
+    path: Path,
+    cards: Sequence[CardRecord],
+    classifications: dict[str, dict[str, TagClassification]],
+    tags: Sequence[str],
+) -> None:
+    """Write reusable candidates so apply retries can skip full rescans."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    candidates_by_tag = build_candidates_by_tag(cards, classifications, tags)
+    payload = {
+        "version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "cards_scanned": len(cards),
+        "tags": list(tags),
+        "candidates": {
+            tag: [
+                {
+                    "card": card_to_json(card),
+                    "classification": {
+                        "score": classifications[tag][card.key].score,
+                        "reason": classifications[tag][card.key].reason,
+                    },
+                }
+                for card in candidates_by_tag[tag]
+            ]
+            for tag in tags
+        },
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def load_candidate_artifact(path: Path, requested_tags: Sequence[str] | None = None) -> CandidateArtifact:
+    """Load candidates produced by a previous scan/dry run."""
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"Candidate file not found: {path}. Run a dry run first.") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Candidate file is not valid JSON: {path}") from exc
+
+    if int(payload.get("version", 0)) != 1:
+        raise RuntimeError(f"Unsupported candidate file version in {path}.")
+
+    raw_candidates = payload.get("candidates", {})
+    if not isinstance(raw_candidates, dict):
+        raise RuntimeError(f"Candidate file is missing a candidates object: {path}")
+
+    available_tags = tuple(tag for tag in payload.get("tags", raw_candidates.keys()) if tag in raw_candidates)
+    tags = tuple(tag for tag in (requested_tags or available_tags) if tag in raw_candidates)
+    if not tags:
+        requested = ", ".join(requested_tags or ())
+        available = ", ".join(available_tags)
+        raise RuntimeError(f"No saved candidates for requested tag(s): {requested or 'none'}. Available: {available or 'none'}.")
+
+    cards_by_tag: dict[str, list[CardRecord]] = {}
+    classifications: dict[str, dict[str, TagClassification]] = {}
+    for tag in tags:
+        cards_by_tag[tag] = []
+        classifications[tag] = {}
+        entries = raw_candidates.get(tag, [])
+        if not isinstance(entries, list):
+            raise RuntimeError(f"Candidate list for tag '{tag}' is malformed in {path}.")
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("card"), dict):
+                raise RuntimeError(f"Candidate entry for tag '{tag}' is malformed in {path}.")
+            card = card_from_json(entry["card"])
+            classification_payload = entry.get("classification", {})
+            classification = TagClassification(
+                tag=tag,
+                is_match=True,
+                score=int(classification_payload.get("score", 0)),
+                reason=str(classification_payload.get("reason") or "loaded from saved candidates"),
+            )
+            cards_by_tag[tag].append(card)
+            classifications[tag][card.key] = classification
+
+    return CandidateArtifact(
+        tags=tags,
+        cards_by_tag=cards_by_tag,
+        classifications=classifications,
+        cards_scanned=int(payload.get("cards_scanned", 0)),
+        generated_at=str(payload.get("generated_at") or ""),
+    )
+
+
+def markdown_cell(value: object) -> str:
+    text = "" if value is None else str(value)
+    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ").strip()
+
+
+def get_first_visible(candidates: Iterable[Locator], timeout_ms: int = 1_500) -> Locator | None:
+    for locator in candidates:
+        candidate = locator.first
+        try:
+            candidate.wait_for(state="visible", timeout=timeout_ms)
+            return candidate
+        except PlaywrightTimeoutError:
+            continue
+        except PlaywrightError:
+            continue
+    return None
+
+
+def save_failure_artifacts(page: Page | None, reason: str) -> None:
+    """Write a small text file and screenshot for debugging failed browser runs."""
+
+    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    safe_reason = re.sub(r"[^a-zA-Z0-9_-]+", "-", reason).strip("-")[:60] or "failure"
+    metadata = ARTIFACT_DIR / f"{safe_reason}.txt"
+    metadata.write_text(
+        "\n".join(
+            [
+                f"reason={reason}",
+                f"timestamp={datetime.now(timezone.utc).isoformat(timespec='seconds')}",
+                f"url={page.url if page else 'unknown'}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    if page is None:
+        return
+    try:
+        page.screenshot(path=ARTIFACT_DIR / f"{safe_reason}.png", full_page=True)
+    except PlaywrightError as exc:
+        log(f"Could not capture failure screenshot: {exc}")
+
+
+def settle_page(page: Page) -> None:
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=DEFAULT_TIMEOUT_MS)
+    except PlaywrightTimeoutError:
+        pass
+
+
+def wait_for_login_hydration(page: Page) -> None:
+    try:
+        page.wait_for_load_state("networkidle", timeout=5_000)
+    except PlaywrightTimeoutError:
+        pass
+    page.wait_for_timeout(500)
+
+
+def fill_login_input(locator: Locator, value: str) -> None:
+    locator.click()
+    locator.press("ControlOrMeta+A")
+    locator.press("Backspace")
+    locator.type(value, delay=5)
+    try:
+        if locator.input_value(timeout=1_000) != value:
+            locator.fill(value)
+    except PlaywrightError:
+        locator.fill(value)
+
+
+def read_login_error(page: Page) -> str:
+    try:
+        body_text = page.locator("body").inner_text(timeout=2_000)
+    except PlaywrightError:
+        return ""
+
+    normalized = normalize_text(body_text)
+    known_errors = (
+        "missing email or phone",
+        "invalid login credentials",
+        "email not confirmed",
+        "too many requests",
+        "rate limit",
+    )
+    for error in known_errors:
+        if error in normalized:
+            return error
+    return ""
+
+
+def login_if_needed(page: Page, email: str, password: str) -> None:
+    """Authenticate if WikiMasters shows the login page."""
+
+    settle_page(page)
+    if "/login" not in page.url:
+        email_field = get_first_visible([page.locator('input[type="email"]')], timeout_ms=500)
+        if email_field is None:
+            log("Already authenticated.")
+            return
+
+    email_input = get_first_visible(
+        [
+            page.get_by_label(re.compile("adresse.*courriel", re.IGNORECASE)),
+            page.get_by_placeholder(re.compile("adresse.*courriel|courriel|email", re.IGNORECASE)),
+            page.locator('input[type="email"]'),
+            page.locator('input[name*="email"], input[name*="mail"]'),
+        ],
+        timeout_ms=3_000,
+    )
+    password_input = get_first_visible(
+        [
+            page.get_by_label(re.compile("mot de passe|password", re.IGNORECASE)),
+            page.get_by_placeholder(re.compile("mot de passe|password", re.IGNORECASE)),
+            page.locator('input[type="password"]'),
+        ],
+        timeout_ms=3_000,
+    )
+
+    if email_input is None or password_input is None:
+        if "/login" in page.url:
+            raise RuntimeError("Login page is visible, but email/password fields were not found.")
+        log("No login form found; assuming existing authenticated session.")
+        return
+
+    log("Logging in to WikiMasters.")
+    email_input.fill(email)
+    password_input.fill(password)
+
+    submit = get_first_visible(
+        [
+            page.get_by_role("button", name=re.compile("^connexion$", re.IGNORECASE)),
+            page.get_by_text("Connexion", exact=True),
+            page.locator('button[type="submit"]'),
+        ],
+        timeout_ms=3_000,
+    )
+    if submit is None:
+        raise RuntimeError("Could not find the Connexion button.")
+
+    login_error = ""
+    for attempt in range(1, 3):
+        wait_for_login_hydration(page)
+        fill_login_input(email_input, email)
+        fill_login_input(password_input, password)
+        page.wait_for_timeout(250)
+
+        submit.click()
+        try:
+            page.wait_for_url(re.compile(r".*/(pulls|paquets|collection|profile|profil).*"), timeout=DEFAULT_TIMEOUT_MS)
+        except PlaywrightTimeoutError:
+            settle_page(page)
+
+        if "/login" not in page.url:
+            break
+
+        login_error = read_login_error(page)
+        if attempt == 1 and login_error == "missing email or phone":
+            log("Login form submitted before app state was ready; retrying once.")
+            continue
+        raise RuntimeError(
+            "Login did not complete; still on the login page"
+            + (f" ({login_error})." if login_error else ".")
+        )
+
+    log("Login completed.")
+
+
+def block_heavy_resources(route: Any) -> None:
+    """Abort image/media/font requests so collection scans stay lightweight."""
+
+    if route.request.resource_type in {"image", "media", "font"}:
+        route.abort()
+        return
+    route.continue_()
+
+
+def extract_visible_cards(page: Page) -> list[CardRecord]:
+    """Read currently visible card-shaped DOM nodes from the collection grid."""
+
+    raw_cards = page.evaluate(
+        """
+        () => {
+          const rarityPattern = /^(L|UR|SR|R|PC|C)$/i;
+          const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+          const linesFor = (element) =>
+            (element.innerText || '').split('\\n').map(normalize).filter(Boolean);
+          const isVisible = (element, rect) => {
+            const style = window.getComputedStyle(element);
+            return (
+              style.visibility !== 'hidden' &&
+              style.display !== 'none' &&
+              style.opacity !== '0' &&
+              rect.width >= 110 &&
+              rect.width <= 280 &&
+              rect.height >= 150 &&
+              rect.height <= 380 &&
+              rect.bottom >= 0 &&
+              rect.top <= window.innerHeight &&
+              rect.right >= 0 &&
+              rect.left <= window.innerWidth
+            );
+          };
+          const selector = 'article, a, button, [role="button"], [role="listitem"], div';
+          const candidates = [];
+          const seen = new Set();
+
+          // Cards do not currently expose stable data attributes, so the
+          // scraper recognizes visible card-sized nodes that include a rarity.
+          for (const element of document.querySelectorAll(selector)) {
+            const rect = element.getBoundingClientRect();
+            if (!isVisible(element, rect)) continue;
+            const lines = linesFor(element);
+            const rarityIndex = lines.findIndex((line) => rarityPattern.test(line));
+            if (rarityIndex < 0 || lines.length < rarityIndex + 3) continue;
+            const text = lines.join('\\n');
+            if (/sélectionner|selectionner|collection|toutes les étiquettes|rarete/i.test(text) && lines.length > 12) {
+              continue;
+            }
+
+            const key = lines.slice(rarityIndex, rarityIndex + 5).join('|').toLowerCase();
+            if (seen.has(key)) continue;
+            seen.add(key);
+            candidates.push({
+              lines,
+              top: rect.top,
+              left: rect.left,
+              area: rect.width * rect.height,
+            });
+          }
+
+          candidates.sort((a, b) => a.top - b.top || a.left - b.left || b.area - a.area);
+          return candidates.map((candidate) => candidate.lines);
+        }
+        """
+    )
+
+    cards: list[CardRecord] = []
+    seen_keys: set[str] = set()
+    for lines in raw_cards:
+        card = parse_card_lines(lines)
+        if card and card.key not in seen_keys:
+            cards.append(card)
+            seen_keys.add(card.key)
+    return cards
+
+
+COLLECTION_SCROLL_TARGET_JS = """
+() => {
+  const elements = [...document.querySelectorAll('main, section, div')];
+  const scrollables = elements
+    .map((element) => {
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      const overflowY = style.overflowY || '';
+      const canScroll = element.scrollHeight > element.clientHeight + 20;
+      if (!canScroll || !/(auto|scroll|overlay)/.test(overflowY)) return null;
+
+      const text = (element.innerText || '').toLowerCase();
+      const collectionScore = text.includes('collection') ? 1000 : 0;
+      const sizeScore = Math.min(element.clientHeight, window.innerHeight);
+      const overflowScore = element.scrollHeight - element.clientHeight;
+      return {
+        element,
+        score: collectionScore + sizeScore + overflowScore / 10,
+        top: rect.top,
+        left: rect.left,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score || a.top - b.top || a.left - b.left);
+
+  return scrollables[0]?.element || document.scrollingElement || document.documentElement;
+}
+"""
+
+
+def read_collection_scroll_metrics(page: Page) -> dict[str, int | bool]:
+    """Return scroll state for the collection's inner scroll container."""
+
+    return page.evaluate(
+        f"""
+        () => {{
+          const target = ({COLLECTION_SCROLL_TARGET_JS})();
+          return {{
+            scrollTop: Math.round(target.scrollTop),
+            clientHeight: Math.round(target.clientHeight),
+            scrollHeight: Math.round(target.scrollHeight),
+            atBottom: target.scrollTop + target.clientHeight >= target.scrollHeight - 24,
+          }};
+        }}
+        """
+    )
+
+
+def scroll_collection(page: Page) -> dict[str, int | bool]:
+    """Advance the collection's inner scroll container by roughly one viewport."""
+
+    return page.evaluate(
+        f"""
+        () => {{
+          const target = ({COLLECTION_SCROLL_TARGET_JS})();
+          target.scrollBy(0, Math.max(240, Math.floor(target.clientHeight * 0.82)));
+          return {{
+            scrollTop: Math.round(target.scrollTop),
+            clientHeight: Math.round(target.clientHeight),
+            scrollHeight: Math.round(target.scrollHeight),
+            atBottom: target.scrollTop + target.clientHeight >= target.scrollHeight - 24,
+          }};
+        }}
+        """
+    )
+
+
+def reset_collection_scroll(page: Page) -> None:
+    page.evaluate(
+        f"""
+        () => {{
+          const target = ({COLLECTION_SCROLL_TARGET_JS})();
+          target.scrollTo(0, 0);
+        }}
+        """
+    )
+
+
+def read_collection_page_counter(page: Page) -> tuple[int, int] | None:
+    try:
+        body_text = page.locator("body").inner_text(timeout=2_000)
+    except PlaywrightError:
+        return None
+
+    match = PAGE_COUNTER_PATTERN.search(body_text)
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def page_label(counter: tuple[int, int] | None) -> str:
+    if counter is None:
+        return "current page"
+    return f"page {counter[0]}/{counter[1]}"
+
+
+def visible_card_signature(page: Page) -> tuple[str, ...]:
+    return tuple(card.key for card in extract_visible_cards(page)[:6])
+
+
+def find_next_page_button(page: Page) -> Locator | None:
+    return get_first_visible(
+        [
+            page.get_by_role("button", name=re.compile(r"suivant|next|→", re.IGNORECASE)),
+            page.get_by_text(re.compile(r"suivant|next", re.IGNORECASE)),
+        ],
+        timeout_ms=1_500,
+    )
+
+
+def click_next_collection_page(page: Page) -> bool:
+    """Click the collection next-page button and wait until cards change."""
+
+    next_button = find_next_page_button(page)
+    if next_button is None:
+        return False
+
+    try:
+        if not next_button.is_enabled(timeout=500):
+            return False
+    except PlaywrightError:
+        pass
+
+    previous_counter = read_collection_page_counter(page)
+    previous_signature = visible_card_signature(page)
+    next_button.click(timeout=5_000)
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        page.wait_for_timeout(250)
+        counter = read_collection_page_counter(page)
+        signature = visible_card_signature(page)
+        if previous_counter and counter and counter[0] != previous_counter[0]:
+            reset_collection_scroll(page)
+            page.wait_for_timeout(300)
+            return True
+        if not previous_counter and signature and signature != previous_signature:
+            reset_collection_scroll(page)
+            page.wait_for_timeout(300)
+            return True
+
+    return False
+
+
+def go_to_collection_page(page: Page, target_page: int | None) -> None:
+    """Move from a fresh collection load to the page recorded during scanning."""
+
+    if not target_page or target_page <= 1:
+        reset_collection_scroll(page)
+        return
+
+    current_page = 1
+    counter = read_collection_page_counter(page)
+    if counter:
+        current_page = counter[0]
+
+    while current_page < target_page:
+        if not click_next_collection_page(page):
+            raise RuntimeError(f"Could not navigate to collection page {target_page}; stopped at page {current_page}.")
+        counter = read_collection_page_counter(page)
+        current_page = counter[0] if counter else current_page + 1
+
+    if current_page != target_page:
+        raise RuntimeError(f"Expected collection page {target_page}, but reached page {current_page}.")
+
+    reset_collection_scroll(page)
+    page.wait_for_timeout(300)
+
+
+def nearby_page_numbers(page_number: int | None, page_total: int | None, radius: int = 3) -> tuple[int, ...]:
+    """Return pages to retry when a card has drifted from its recorded page."""
+
+    if not page_number:
+        return ()
+
+    pages: list[int] = []
+    offsets = [0]
+    for distance in range(1, radius + 1):
+        offsets.extend([-distance, distance])
+
+    for offset in offsets:
+        candidate = page_number + offset
+        if candidate < 1:
+            continue
+        if page_total is not None and candidate > page_total:
+            continue
+        if candidate not in pages:
+            pages.append(candidate)
+    return tuple(pages)
+
+
+def scan_collection_page(page: Page, max_cards: int, scroll_delay_ms: int) -> list[CardRecord]:
+    """Collect all cards visible on one paginated collection page."""
+
+    records: dict[str, CardRecord] = {}
+    stagnant_rounds = 0
+    initial_deadline = time.monotonic() + 15
+
+    reset_collection_scroll(page)
+    page.wait_for_timeout(scroll_delay_ms)
+
+    while time.monotonic() < initial_deadline:
+        initial_cards = extract_visible_cards(page)
+        if initial_cards:
+            for card in initial_cards:
+                records.setdefault(card.key, card)
+            break
+        page.wait_for_timeout(500)
+
+    while True:
+        before_count = len(records)
+        for card in extract_visible_cards(page):
+            records.setdefault(card.key, card)
+
+        if len(records) != before_count:
+            stagnant_rounds = 0
+        else:
+            stagnant_rounds += 1
+
+        if max_cards > 0 and len(records) >= max_cards:
+            break
+
+        metrics = read_collection_scroll_metrics(page)
+        if metrics["atBottom"] and stagnant_rounds >= 2:
+            break
+
+        previous_scroll_top = metrics["scrollTop"]
+        metrics = scroll_collection(page)
+        page.wait_for_timeout(scroll_delay_ms)
+        if metrics["scrollTop"] == previous_scroll_top:
+            stagnant_rounds += 1
+
+    return list(records.values())[:max_cards or None]
+
+
+def scan_collection(page: Page, max_cards: int, scroll_delay_ms: int) -> list[CardRecord]:
+    """Scan every collection page once, respecting --max-cards when provided."""
+
+    records: dict[str, CardRecord] = {}
+    visited_pages: set[tuple[int, int]] = set()
+    inferred_page_number = 1
+
+    while True:
+        counter = read_collection_page_counter(page)
+        if counter:
+            if counter in visited_pages:
+                log(f"Already scanned {page_label(counter)}; stopping to avoid a pagination loop.")
+                break
+            visited_pages.add(counter)
+            inferred_page_number = counter[0]
+
+        remaining = max_cards - len(records) if max_cards > 0 else 0
+        log(f"Scanning collection {page_label(counter)}.")
+        page_cards = scan_collection_page(page, remaining, scroll_delay_ms)
+
+        before_total = len(records)
+        for card in page_cards:
+            card_with_page = replace(
+                card,
+                page_number=counter[0] if counter else inferred_page_number,
+                page_total=counter[1] if counter else None,
+            )
+            records.setdefault(card.key, card_with_page)
+        added = len(records) - before_total
+        log(f"Scanned {page_label(counter)}: {len(page_cards)} card(s), {added} new, {len(records)} total.")
+
+        if max_cards > 0 and len(records) >= max_cards:
+            log(f"Reached --max-cards={max_cards}; stopping scan.")
+            break
+
+        counter = read_collection_page_counter(page)
+        if counter and counter[0] >= counter[1]:
+            log(f"Reached final collection page {counter[0]}/{counter[1]}.")
+            break
+
+        if not click_next_collection_page(page):
+            log("No enabled next page button found; collection scan is complete.")
+            break
+        inferred_page_number += 1
+
+    return list(records.values())[:max_cards or None]
+
+
+class WikipediaClient:
+    """Batched, cached wrapper around the French Wikipedia query API."""
+
+    def __init__(self, cache_path: Path, delay_ms: int, batch_size: int, timeout_seconds: int = 15) -> None:
+        self.cache_path = cache_path
+        self.delay_ms = delay_ms
+        self.batch_size = max(1, min(batch_size, 25))
+        self.timeout_seconds = timeout_seconds
+        self.cache: dict[str, dict[str, Any]] = self._load_cache()
+        self.description_prop_supported = True
+
+    def _load_cache(self) -> dict[str, dict[str, Any]]:
+        """Load cached page metadata, falling back to the old plant cache."""
+
+        path = self.cache_path
+        if path == DEFAULT_CACHE_PATH and not path.exists() and LEGACY_CACHE_PATH.exists():
+            path = LEGACY_CACHE_PATH
+            log(f"Loading legacy Wikipedia cache {LEGACY_CACHE_PATH}; future writes use {self.cache_path}.")
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except (json.JSONDecodeError, OSError) as exc:
+            log(f"Could not read Wikipedia cache {path}: {exc}")
+            return {}
+
+    def save_cache(self) -> None:
+        """Persist metadata after every fetched batch to survive interrupted runs."""
+
+        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        self.cache_path.write_text(json.dumps(self.cache, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    def fetch_many(self, titles: Sequence[str]) -> dict[str, WikipediaMetadata]:
+        """Fetch uncached titles in throttled batches and return all requested data."""
+
+        unique_titles = [title for title in dict.fromkeys(titles) if title.strip()]
+        result: dict[str, WikipediaMetadata] = {}
+        missing_titles = [title for title in unique_titles if title not in self.cache]
+
+        for title in unique_titles:
+            if title in self.cache:
+                result[title] = self._metadata_from_cache(title, self.cache[title])
+
+        for start in range(0, len(missing_titles), self.batch_size):
+            batch = missing_titles[start : start + self.batch_size]
+            try:
+                fetched = self._fetch_batch(batch)
+            except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+                log(f"Wikipedia lookup failed for {len(batch)} title(s): {exc}")
+                fetched = {title: WikipediaMetadata(title=title, missing=True) for title in batch}
+
+            for title, metadata in fetched.items():
+                self.cache[title] = {
+                    "title": metadata.title,
+                    "description": metadata.description,
+                    "extract": metadata.extract,
+                    "categories": list(metadata.categories),
+                    "missing": metadata.missing,
+                    "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                }
+                result[title] = metadata
+            self.save_cache()
+            time.sleep(self.delay_ms / 1_000)
+
+        return result
+
+    def _metadata_from_cache(self, requested_title: str, payload: dict[str, Any]) -> WikipediaMetadata:
+        return WikipediaMetadata(
+            title=str(payload.get("title") or requested_title),
+            description=str(payload.get("description") or ""),
+            extract=str(payload.get("extract") or ""),
+            categories=tuple(str(category) for category in payload.get("categories", [])),
+            missing=bool(payload.get("missing")),
+        )
+
+    def _fetch_batch(self, titles: Sequence[str]) -> dict[str, WikipediaMetadata]:
+        """Fetch one Wikipedia API batch and normalize redirects/missing pages."""
+
+        props = "description|categories|extracts" if self.description_prop_supported else "categories|extracts"
+        data = self._request_query(titles, props)
+        if data.get("error") and "description" in props:
+            self.description_prop_supported = False
+            data = self._request_query(titles, "categories|extracts")
+
+        pages = data.get("query", {}).get("pages", [])
+        pages_by_title = {page.get("title", ""): page for page in pages}
+        redirect_to: dict[str, str] = {}
+        for redirect in data.get("query", {}).get("redirects", []):
+            redirect_to[str(redirect.get("from", ""))] = str(redirect.get("to", ""))
+
+        result: dict[str, WikipediaMetadata] = {}
+        for requested_title in titles:
+            page_title = redirect_to.get(requested_title, requested_title)
+            page = pages_by_title.get(page_title) or pages_by_title.get(requested_title)
+            if not page or page.get("missing"):
+                result[requested_title] = WikipediaMetadata(title=requested_title, missing=True)
+                continue
+
+            categories = tuple(
+                str(category.get("title", "")).removeprefix("Catégorie:")
+                for category in page.get("categories", [])
+                if category.get("title")
+            )
+            result[requested_title] = WikipediaMetadata(
+                title=str(page.get("title") or requested_title),
+                description=str(page.get("description") or ""),
+                extract=str(page.get("extract") or ""),
+                categories=categories,
+                missing=False,
+            )
+
+        return result
+
+    def _request_query(self, titles: Sequence[str], props: str) -> dict[str, Any]:
+        params = {
+            "action": "query",
+            "format": "json",
+            "formatversion": "2",
+            "redirects": "1",
+            "prop": props,
+            "titles": "|".join(titles),
+            "cllimit": "max",
+            "exintro": "1",
+            "explaintext": "1",
+        }
+        url = f"{WIKIPEDIA_API_URL}?{urllib.parse.urlencode(params)}"
+        request = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "project-wikimaster-topic-tagger/1.0 (https://www.wiki-masters.com)",
+                "Accept": "application/json",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+
+def find_collection_search(page: Page) -> Locator | None:
+    return get_first_visible(
+        [
+            page.get_by_placeholder(re.compile("rechercher", re.IGNORECASE)),
+            page.locator('input[type="search"]'),
+            page.locator('input[placeholder*="Rechercher"], input[placeholder*="rechercher"]'),
+        ],
+        timeout_ms=1_000,
+    )
+
+
+def select_all_text(locator: Locator) -> None:
+    locator.press("ControlOrMeta+A")
+
+
+def filter_collection(page: Page, query: str, delay_ms: int) -> None:
+    search = find_collection_search(page)
+    if search is None:
+        raise RuntimeError("Could not find the collection search input.")
+    search.fill(query)
+    page.wait_for_timeout(delay_ms)
+
+
+def clear_collection_filter(page: Page, delay_ms: int) -> None:
+    search = find_collection_search(page)
+    if search is None:
+        return
+    select_all_text(search)
+    search.press("Backspace")
+    page.wait_for_timeout(delay_ms)
+
+
+def click_select_mode(page: Page) -> None:
+    selector = get_first_visible(
+        [
+            page.get_by_role("button", name=re.compile("^sélectionner$|^selectionner$", re.IGNORECASE)),
+            page.get_by_text(re.compile("^sélectionner$|^selectionner$", re.IGNORECASE)),
+        ],
+        timeout_ms=2_500,
+    )
+    if selector is None:
+        raise RuntimeError("Could not find the collection Sélectionner button.")
+    selector.click(timeout=5_000)
+    page.wait_for_timeout(500)
+
+
+def find_card_click_point_by_scrolling(page: Page, card: CardRecord, delay_ms: int) -> dict[str, float] | None:
+    """Search the current page's scroll container for a card click point."""
+
+    reset_collection_scroll(page)
+    page.wait_for_timeout(delay_ms)
+    stagnant_rounds = 0
+
+    while True:
+        point = find_visible_card_click_point(page, card)
+        if point is not None:
+            return point
+
+        metrics = read_collection_scroll_metrics(page)
+        if metrics["atBottom"] and stagnant_rounds >= 2:
+            return None
+
+        previous_scroll_top = metrics["scrollTop"]
+        metrics = scroll_collection(page)
+        page.wait_for_timeout(delay_ms)
+        if metrics["scrollTop"] == previous_scroll_top:
+            stagnant_rounds += 1
+        else:
+            stagnant_rounds = 0
+
+
+def find_visible_card_click_point(page: Page, card: CardRecord) -> dict[str, float] | None:
+    """Find the checkbox/card center used to select one searched card."""
+
+    return page.evaluate(
+        """
+        ({ title, subtitle }) => {
+          const normalize = (value) =>
+            (value || '')
+              .normalize('NFD')
+              .replace(/[\\u0300-\\u036f]/g, '')
+              .toLowerCase()
+              .replace(/\\s+/g, ' ')
+              .trim();
+          const titleNorm = normalize(title);
+          const subtitleNorm = normalize(subtitle);
+          const rarityPattern = /^(L|UR|SR|R|PC|C)$/i;
+          const candidates = [];
+
+          for (const element of document.querySelectorAll('article, a, button, [role="button"], [role="listitem"], div')) {
+            const rect = element.getBoundingClientRect();
+            const style = window.getComputedStyle(element);
+            if (
+              style.visibility === 'hidden' ||
+              style.display === 'none' ||
+              rect.width < 110 ||
+              rect.width > 280 ||
+              rect.height < 150 ||
+              rect.height > 380 ||
+              rect.bottom < 0 ||
+              rect.top > window.innerHeight
+            ) {
+              continue;
+            }
+
+            const lines = (element.innerText || '').split('\\n').map((line) => normalize(line)).filter(Boolean);
+            if (!lines.some((line) => rarityPattern.test(line))) continue;
+            const hasTitle = lines.some((line) => line === titleNorm || line.includes(titleNorm) || titleNorm.includes(line));
+            if (!hasTitle) continue;
+            const hasSubtitle = !subtitleNorm || lines.some((line) => line === subtitleNorm || line.includes(subtitleNorm));
+            const score = (hasSubtitle ? 1000 : 0) - rect.top;
+            candidates.push({ element, rect, score });
+          }
+
+          candidates.sort((a, b) => b.score - a.score);
+          const candidate = candidates[0];
+          if (!candidate) return null;
+
+          const controls = [...candidate.element.querySelectorAll('input[type="checkbox"], [role="checkbox"]')]
+            .map((control) => ({ control, rect: control.getBoundingClientRect() }))
+            .filter(({ rect }) => rect.width > 0 && rect.height > 0);
+          if (controls.length) {
+            const rect = controls[0].rect;
+            return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+          }
+
+          return {
+            x: candidate.rect.left + candidate.rect.width / 2,
+            y: candidate.rect.top + candidate.rect.height / 2,
+          };
+        }
+        """,
+        {"title": card.title, "subtitle": card.subtitle},
+    )
+
+
+def select_card(page: Page, card: CardRecord, selection_delay_ms: int) -> None:
+    """Scroll the current page, then search if needed, and click a card."""
+
+    point = find_card_click_point_by_scrolling(page, card, selection_delay_ms)
+    used_filter = False
+    if point is None:
+        filter_collection(page, card.title, selection_delay_ms)
+        used_filter = True
+        point = find_visible_card_click_point(page, card)
+    if point is None:
+        page_hint = f" on page {card.page_number}" if card.page_number else ""
+        raise RuntimeError(f"Could not find visible card to select{page_hint}: {card.title}")
+
+    page.mouse.click(point["x"], point["y"])
+    page.wait_for_timeout(selection_delay_ms)
+    if used_filter:
+        clear_collection_filter(page, selection_delay_ms)
+
+
+def select_card_with_page_fallback(page: Page, card: CardRecord, selection_delay_ms: int) -> int | None:
+    """Select a card, retrying nearby pages if pagination shifted after mutations."""
+
+    tried_pages = [card.page_number] if card.page_number else []
+    try:
+        select_card(page, card, selection_delay_ms)
+        return card.page_number
+    except RuntimeError as first_error:
+        last_error = first_error
+
+    for fallback_page in nearby_page_numbers(card.page_number, card.page_total):
+        if fallback_page == card.page_number:
+            continue
+        try:
+            page.goto(COLLECTION_URL, wait_until="domcontentloaded")
+            settle_page(page)
+            go_to_collection_page(page, fallback_page)
+            click_select_mode(page)
+            clear_collection_filter(page, selection_delay_ms)
+            select_card(page, card, selection_delay_ms)
+            log(f"Found '{card.title}' on page {fallback_page} after recorded page {card.page_number}.")
+            return fallback_page
+        except RuntimeError as exc:
+            tried_pages.append(fallback_page)
+            last_error = exc
+
+    tried = ", ".join(str(page_number) for page_number in tried_pages if page_number is not None)
+    raise RuntimeError(f"{last_error} Tried nearby pages: {tried or 'none'}.") from last_error
+
+
+def dump_visible_controls(page: Page) -> str:
+    try:
+        controls = page.evaluate(
+            """
+            () => [...document.querySelectorAll('button, [role="button"], [role="menuitem"], [role="option"], input, select')]
+              .map((element) => {
+                const rect = element.getBoundingClientRect();
+                const style = window.getComputedStyle(element);
+                if (style.visibility === 'hidden' || style.display === 'none' || rect.width === 0 || rect.height === 0) {
+                  return null;
+                }
+                return [
+                  element.tagName.toLowerCase(),
+                  element.getAttribute('role') || '',
+                  element.getAttribute('aria-label') || '',
+                  element.getAttribute('placeholder') || '',
+                  (element.innerText || element.value || '').replace(/\\s+/g, ' ').trim(),
+                ].filter(Boolean).join(' | ');
+              })
+              .filter(Boolean)
+              .slice(0, 80)
+            """
+        )
+        return "\n".join(f"- {control}" for control in controls)
+    except PlaywrightError:
+        return "- could not inspect visible controls"
+
+
+def click_bulk_tag_menu(page: Page) -> None:
+    """Open the bulk etiquette action using visible text/labels."""
+
+    point = page.evaluate(
+        """
+        () => {
+          const normalize = (value) =>
+            (value || '')
+              .normalize('NFD')
+              .replace(/[\\u0300-\\u036f]/g, '')
+              .toLowerCase()
+              .replace(/\\s+/g, ' ')
+              .trim();
+          const candidates = [];
+          for (const element of document.querySelectorAll('button, [role="button"], a')) {
+            const rect = element.getBoundingClientRect();
+            const style = window.getComputedStyle(element);
+            if (style.visibility === 'hidden' || style.display === 'none' || rect.width < 24 || rect.height < 24) {
+              continue;
+            }
+            const text = normalize([
+              element.innerText,
+              element.getAttribute('aria-label'),
+              element.getAttribute('title'),
+            ].filter(Boolean).join(' '));
+            if (!/(etiquet|tag)/.test(text)) continue;
+            if (/toutes les etiquettes|filtre/.test(text)) continue;
+            const score =
+              (/etiqueter|ajouter|add/.test(text) ? 1000 : 0) +
+              (/etiquet|tag/.test(text) ? 200 : 0) -
+              rect.top;
+            candidates.push({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, score, text });
+          }
+          candidates.sort((a, b) => b.score - a.score);
+          return candidates[0] || null;
+        }
+        """
+    )
+    if not point:
+        raise RuntimeError("Could not find a bulk étiquette action.\n" + dump_visible_controls(page))
+    page.mouse.click(point["x"], point["y"])
+    page.wait_for_timeout(600)
+
+
+def click_tag_option_or_fill(page: Page, target_tag: str) -> None:
+    option_pattern = re.compile(rf"^{re.escape(target_tag)}$", re.IGNORECASE)
+    option = get_first_visible(
+        [
+            page.get_by_role("option", name=option_pattern),
+            page.get_by_role("menuitem", name=option_pattern),
+            page.get_by_role("button", name=option_pattern),
+        ],
+        timeout_ms=1_000,
+    )
+    if option is not None:
+        option.click(timeout=3_000)
+        page.wait_for_timeout(500)
+        return
+
+    tag_input = get_first_visible(
+        [
+            page.get_by_role("combobox", name=re.compile("étiquette|etiquette|tag", re.IGNORECASE)),
+            page.get_by_placeholder(re.compile("étiquette|etiquette|tag", re.IGNORECASE)),
+            page.locator('input[aria-label*="tiquette"], input[placeholder*="tiquette"]'),
+        ],
+        timeout_ms=1_000,
+    )
+    if tag_input is None:
+        raise RuntimeError(f"Could not find or enter target tag '{target_tag}'.\n" + dump_visible_controls(page))
+
+    tag_input.fill(target_tag)
+    page.wait_for_timeout(300)
+    tag_input.press("Enter")
+    page.wait_for_timeout(500)
+
+
+def read_bulk_tag_result(page: Page) -> BulkTagResult | None:
+    try:
+        body_text = page.locator("body").inner_text(timeout=1_000)
+    except PlaywrightError:
+        return None
+    return parse_bulk_tag_result_text(body_text)
+
+
+def wait_for_bulk_tag_result(page: Page, timeout_ms: int = 5_000) -> BulkTagResult | None:
+    deadline = time.monotonic() + timeout_ms / 1_000
+    while time.monotonic() < deadline:
+        result = read_bulk_tag_result(page)
+        if result is not None:
+            return result
+        page.wait_for_timeout(150)
+    return read_bulk_tag_result(page)
+
+
+def click_confirmation_if_present(page: Page) -> None:
+    """Click an apply-style confirmation button if the bulk-tag modal shows one."""
+
+    confirm = get_first_visible(
+        [
+            page.get_by_role(
+                "button",
+                name=re.compile("appliquer|ajouter|enregistrer|valider|confirmer", re.IGNORECASE),
+            ),
+            page.get_by_text(re.compile("appliquer|ajouter|enregistrer|valider|confirmer", re.IGNORECASE)),
+        ],
+        timeout_ms=800,
+    )
+    if confirm is not None:
+        try:
+            if confirm.is_enabled(timeout=500):
+                confirm.click(timeout=3_000)
+                page.wait_for_timeout(700)
+        except PlaywrightError:
+            pass
+
+
+def click_bulk_result_close(page: Page) -> None:
+    """Close the bulk-tag result modal if it is visible."""
+
+    close_button = get_first_visible(
+        [
+            page.get_by_role("button", name=re.compile(r"^terminé$|^termine$|^ok$|^fermer$", re.IGNORECASE)),
+            page.get_by_text(re.compile(r"^terminé$|^termine$|^ok$|^fermer$", re.IGNORECASE)),
+        ],
+        timeout_ms=1_500,
+    )
+    if close_button is not None:
+        try:
+            close_button.click(timeout=3_000)
+            page.wait_for_timeout(700)
+            return
+        except PlaywrightError:
+            pass
+
+    point = page.evaluate(
+        """
+        () => {
+          const normalize = (value) =>
+            (value || '')
+              .normalize('NFD')
+              .replace(/[\\u0300-\\u036f]/g, '')
+              .toLowerCase()
+              .replace(/\\s+/g, ' ')
+              .trim();
+          const isVisible = (element, rect) => {
+            const style = window.getComputedStyle(element);
+            return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+          };
+          const dialogs = [...document.querySelectorAll('[role="dialog"], [aria-modal="true"], div')]
+            .map((element) => {
+              const rect = element.getBoundingClientRect();
+              if (!isVisible(element, rect)) return null;
+              const text = normalize(element.innerText || '');
+              if (!/(carte etiquetee|deja etiquetee|appliquer une etiquette)/.test(text)) return null;
+              return { element, rect, area: rect.width * rect.height };
+            })
+            .filter(Boolean)
+            .sort((a, b) => a.area - b.area);
+          const dialog = dialogs[0]?.element;
+          if (!dialog) return null;
+
+          const buttons = [...dialog.querySelectorAll('button, [role="button"], a')]
+            .map((element) => {
+              const rect = element.getBoundingClientRect();
+              if (!isVisible(element, rect)) return null;
+              const text = normalize([
+                element.innerText,
+                element.getAttribute('aria-label'),
+                element.getAttribute('title'),
+              ].filter(Boolean).join(' '));
+              const score =
+                (/termine|fermer|close|ok/.test(text) ? 1000 : 0) +
+                (rect.top < dialog.getBoundingClientRect().top + 80 && rect.left > dialog.getBoundingClientRect().right - 90 ? 300 : 0);
+              return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, score };
+            })
+            .filter(Boolean)
+            .sort((a, b) => b.score - a.score);
+          return buttons[0] || null;
+        }
+        """
+    )
+    if point:
+        page.mouse.click(point["x"], point["y"])
+        page.wait_for_timeout(700)
+        return
+
+    try:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(700)
+    except PlaywrightError:
+        pass
+
+
+def add_tag_to_selected(page: Page, target_tag: str) -> BulkTagResult | None:
+    """Use the open bulk UI to add one etiquette to selected cards."""
+
+    click_bulk_tag_menu(page)
+    click_tag_option_or_fill(page, target_tag)
+    result = wait_for_bulk_tag_result(page, timeout_ms=2_000)
+    if result is None:
+        click_confirmation_if_present(page)
+        result = wait_for_bulk_tag_result(page, timeout_ms=5_000)
+    if result is not None:
+        log(f"Bulk tag result: {result.tagged} tagged, {result.already_tagged} already tagged.")
+        click_bulk_result_close(page)
+        return result
+
+    click_confirmation_if_present(page)
+    return None
+
+
+def visible_card_has_tag(page: Page, card: CardRecord, target_tag: str) -> bool:
+    for visible_card in extract_visible_cards(page):
+        if normalize_text(visible_card.title) == normalize_text(card.title):
+            return has_target_tag(visible_card, target_tag)
+    return False
+
+
+def card_has_tag_by_scrolling(page: Page, card: CardRecord, target_tag: str, delay_ms: int) -> bool:
+    """Scan the current page's scroll container until the card/tag is found."""
+
+    reset_collection_scroll(page)
+    page.wait_for_timeout(delay_ms)
+    stagnant_rounds = 0
+
+    while True:
+        if visible_card_has_tag(page, card, target_tag):
+            return True
+
+        metrics = read_collection_scroll_metrics(page)
+        if metrics["atBottom"] and stagnant_rounds >= 2:
+            return False
+
+        previous_scroll_top = metrics["scrollTop"]
+        metrics = scroll_collection(page)
+        page.wait_for_timeout(delay_ms)
+        if metrics["scrollTop"] == previous_scroll_top:
+            stagnant_rounds += 1
+        else:
+            stagnant_rounds = 0
+
+
+def verify_batch_tags(page: Page, batch: Sequence[CardRecord], target_tag: str, delay_ms: int) -> None:
+    """Re-scan each selected card's page after applying and confirm the tag."""
+
+    missing: list[str] = []
+    for card in batch:
+        found = False
+        for _ in range(5):
+            if card_has_tag_by_scrolling(page, card, target_tag, delay_ms):
+                found = True
+                break
+            page.wait_for_timeout(delay_ms)
+        if not found:
+            missing.append(card.title)
+
+    if missing:
+        raise RuntimeError(f"Tag verification failed for: {', '.join(missing)}")
+
+
+def iter_page_batches(cards: Sequence[CardRecord], batch_size: int) -> Iterable[tuple[int | None, list[CardRecord]]]:
+    """Yield mutation batches that never span collection pages."""
+
+    cards_by_page: dict[int | None, list[CardRecord]] = {}
+    for card in cards:
+        cards_by_page.setdefault(card.page_number, []).append(card)
+
+    def page_sort_key(page_number: int | None) -> int:
+        return page_number if page_number is not None else 1_000_000
+
+    for page_number in sorted(cards_by_page, key=page_sort_key):
+        page_cards = cards_by_page[page_number]
+        for start in range(0, len(page_cards), batch_size):
+            yield page_number, list(page_cards[start : start + batch_size])
+
+
+def apply_tag_batches(
+    page: Page,
+    cards: Sequence[CardRecord],
+    target_tag: str,
+    batch_size: int,
+    selection_delay_ms: int,
+    batch_delay_ms: int,
+) -> list[CardRecord]:
+    """Apply one target tag to candidates in small, verified UI batches."""
+
+    applied: list[CardRecord] = []
+    batches = list(iter_page_batches(cards, batch_size))
+    for batch_index, (page_number, batch) in enumerate(batches, start=1):
+        page.goto(COLLECTION_URL, wait_until="domcontentloaded")
+        settle_page(page)
+        go_to_collection_page(page, page_number)
+        click_select_mode(page)
+        clear_collection_filter(page, selection_delay_ms)
+
+        page_hint = f" on page {page_number}" if page_number else ""
+        log(f"Selecting {len(batch)} card(s){page_hint} for batch {batch_index}/{len(batches)}.")
+        selected_count = 0
+        for card in batch:
+            try:
+                select_card_with_page_fallback(page, card, selection_delay_ms)
+            except RuntimeError:
+                if selected_count > 0:
+                    raise RuntimeError(
+                        "A later card in the batch drifted to another page after earlier selections. "
+                        "Retry with --batch-size 1."
+                    )
+                raise
+            selected_count += 1
+
+        page.wait_for_timeout(batch_delay_ms)
+        bulk_result = add_tag_to_selected(page, target_tag)
+        page.wait_for_timeout(batch_delay_ms)
+        if bulk_result is None or bulk_result.successful_count < len(batch):
+            verify_batch_tags(page, batch, target_tag, selection_delay_ms)
+        applied.extend(batch)
+        log(f"Applied '{target_tag}' to {len(applied)}/{len(cards)} candidate card(s).")
+
+    return applied
+
+
+def write_report(
+    path: Path,
+    cards: Sequence[CardRecord],
+    classifications: dict[str, dict[str, TagClassification]],
+    tags: Sequence[str],
+    dry_run: bool,
+    applied: dict[str, Sequence[CardRecord]] | None = None,
+    sample_per_tag: int = 10,
+) -> None:
+    """Write a grouped Markdown report for dry-run review or apply results."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    applied = applied or {}
+    already_tagged_by_tag: dict[str, list[CardRecord]] = {}
+    applied_keys_by_tag = {tag: {card.key for card in applied_cards} for tag, applied_cards in applied.items()}
+    candidates_by_tag = build_candidates_by_tag(cards, classifications, tags)
+    for tag in tags:
+        already_tagged_by_tag[tag] = [card for card in cards if has_target_tag(card, tag)]
+
+    total_candidates = sum(len(cards_for_tag) for cards_for_tag in candidates_by_tag.values())
+    total_applied = sum(len(cards_for_tag) for cards_for_tag in applied.values())
+    sample_label = "all" if sample_per_tag <= 0 else str(sample_per_tag)
+
+    lines = [
+        "# WikiMasters Topic Tag Report",
+        "",
+        f"- Timestamp: {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
+        f"- Mode: {'dry-run' if dry_run else 'apply'}",
+        f"- Enabled tags: {', '.join(f'`{tag}`' for tag in tags)}",
+        f"- Sample per tag in report: {sample_label}",
+        f"- Cards scanned: {len(cards)}",
+        f"- Candidate card/tag additions: {total_candidates}",
+        f"- Card/tag additions applied this run: {total_applied}",
+        "",
+        "| Tag | Already tagged | Candidates needing tag | Applied this run |",
+        "|---|---:|---:|---:|",
+    ]
+
+    for tag in tags:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    markdown_cell(tag),
+                    markdown_cell(len(already_tagged_by_tag[tag])),
+                    markdown_cell(len(candidates_by_tag[tag])),
+                    markdown_cell(len(applied.get(tag, ()))),
+                ]
+            )
+            + " |"
+        )
+
+    if not total_candidates:
+        lines.extend(["", "No untagged candidate cards were found for the enabled tags."])
+
+    for tag in tags:
+        definition = TAG_DEFINITIONS[tag]
+        candidates = candidates_by_tag[tag]
+        lines.extend(["", f"## `{tag}`", "", definition.description, ""])
+        if not candidates:
+            lines.append("No untagged candidates found.")
+            continue
+
+        shown_candidates = candidates[:sample_per_tag] if sample_per_tag > 0 else candidates
+        hidden_count = len(candidates) - len(shown_candidates)
+        lines.extend(
+            [
+                "| Title | Subtitle | Page | Rarity | Tags | Score | Reason | Action |",
+                "|---|---|---:|---:|---|---:|---|---|",
+            ]
+        )
+        for card in shown_candidates:
+            classification = classifications[tag][card.key]
+            action = "applied" if card.key in applied_keys_by_tag.get(tag, set()) else ("would apply" if dry_run else "pending")
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        markdown_cell(card.title),
+                        markdown_cell(card.subtitle),
+                        markdown_cell(card.page_number or ""),
+                        markdown_cell(card.rarity),
+                        markdown_cell(", ".join(card.tags)),
+                        markdown_cell(classification.score),
+                        markdown_cell(classification.reason),
+                        markdown_cell(action),
+                    ]
+                )
+                + " |"
+            )
+        if hidden_count > 0:
+            lines.append("")
+            lines.append(f"{hidden_count} additional `{tag}` candidate(s) omitted by `--sample-per-tag`.")
+
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        try:
+            with Path(summary_path).open("a", encoding="utf-8") as summary_file:
+                summary_file.write("\n".join(lines[: 12 + len(tags)]) + "\n")
+        except OSError as exc:
+            log(f"Could not write GitHub step summary: {exc}")
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Build the CLI used for local dry runs and optional apply runs."""
+
+    parser = argparse.ArgumentParser(description="Tag WikiMasters collection cards for supported topics.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="Report candidates without changing WikiMasters tags.")
+    mode.add_argument("--apply", action="store_true", help="Apply matching tags through the WikiMasters bulk UI.")
+    mode.add_argument(
+        "--apply-candidates",
+        action="store_true",
+        help="Apply tags from the saved candidate JSON without rescanning the full collection.",
+    )
+    parser.add_argument(
+        "--tags",
+        default=None,
+        help=f"Comma-separated tags to classify. Defaults to all supported tags: {DEFAULT_TAGS}.",
+    )
+    parser.add_argument("--target-tag", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--sample-per-tag", type=int, default=10, help="Maximum candidates shown per tag in the report. 0 shows all.")
+    parser.add_argument("--max-cards", type=int, default=0, help="Maximum cards to scan. 0 means all loaded cards.")
+    parser.add_argument("--batch-size", type=int, default=8, help="Cards to select and tag per mutation batch.")
+    parser.add_argument("--scroll-delay-ms", type=int, default=700, help="Delay after each collection scroll.")
+    parser.add_argument("--selection-delay-ms", type=int, default=250, help="Delay between selection/search actions.")
+    parser.add_argument("--batch-delay-ms", type=int, default=1_500, help="Delay before and after bulk tag application.")
+    parser.add_argument("--wikipedia-delay-ms", type=int, default=500, help="Delay between Wikipedia API batches.")
+    parser.add_argument("--wikipedia-batch-size", type=int, default=20, help="Wikipedia titles per API request.")
+    parser.add_argument("--cache-path", type=Path, default=DEFAULT_CACHE_PATH, help="Wikipedia metadata cache path.")
+    parser.add_argument("--report-path", type=Path, default=DEFAULT_REPORT_PATH, help="Markdown report output path.")
+    parser.add_argument("--candidate-path", type=Path, default=DEFAULT_CANDIDATE_PATH, help="JSON candidate artifact path.")
+    return parser
+
+
+def run(args: argparse.Namespace) -> int:
+    """Execute the full scan, classify, report, and optional apply workflow."""
+
+    if sync_playwright is None:
+        raise RuntimeError("Playwright is not installed. Run `python -m pip install -r requirements.txt` first.")
+
+    dry_run = not args.apply and not args.apply_candidates
+    email = required_env("WIKIMASTERS_EMAIL")
+    password = required_env("WIKIMASTERS_PASSWORD")
+    headless = os.environ.get("HEADLESS", "1").lower() not in {"0", "false", "no"}
+    if args.tags and args.target_tag:
+        raise RuntimeError("Use either --tags or the legacy --target-tag option, not both.")
+    if args.apply_candidates and not args.tags and not args.target_tag:
+        enabled_tags: tuple[str, ...] = ()
+    else:
+        tags_arg = args.target_tag if args.target_tag else (args.tags or DEFAULT_TAGS)
+        try:
+            enabled_tags = parse_tags_arg(tags_arg)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+    if args.batch_size < 1:
+        raise RuntimeError("--batch-size must be at least 1.")
+    if args.sample_per_tag < 0:
+        raise RuntimeError("--sample-per-tag cannot be negative.")
+
+    page: Page | None = None
+    cards: list[CardRecord] = []
+    classifications: dict[str, dict[str, TagClassification]] = {}
+    applied: dict[str, list[CardRecord]] = {tag: [] for tag in enabled_tags}
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=headless)
+        context = browser.new_context(
+            locale="fr-FR",
+            timezone_id="Europe/Paris",
+            viewport={"width": 1440, "height": 900},
+        )
+        context.route("**/*", block_heavy_resources)
+        page = context.new_page()
+        page.set_default_timeout(DEFAULT_TIMEOUT_MS)
+
+        try:
+            page.goto(COLLECTION_URL, wait_until="domcontentloaded")
+            login_if_needed(page, email, password)
+            page.goto(COLLECTION_URL, wait_until="domcontentloaded")
+            settle_page(page)
+
+            if args.apply_candidates:
+                requested_tags = enabled_tags or None
+                candidate_artifact = load_candidate_artifact(args.candidate_path, requested_tags=requested_tags)
+                enabled_tags = candidate_artifact.tags
+                applied = {tag: [] for tag in enabled_tags}
+                log(
+                    f"Loaded saved candidates from {args.candidate_path} "
+                    f"({candidate_artifact.cards_scanned} cards scanned at {candidate_artifact.generated_at or 'unknown time'})."
+                )
+                for tag in enabled_tags:
+                    candidates = candidate_artifact.cards_by_tag[tag]
+                    if not candidates:
+                        log(f"No saved '{tag}' candidates to apply.")
+                        continue
+                    log(f"Applying '{tag}' to {len(candidates)} saved candidate card(s).")
+                    applied[tag] = apply_tag_batches(
+                        page,
+                        candidates,
+                        tag,
+                        args.batch_size,
+                        args.selection_delay_ms,
+                        args.batch_delay_ms,
+                    )
+                total_applied = sum(len(tag_cards) for tag_cards in applied.values())
+                log(f"Run completed successfully. Applied {total_applied} saved candidate card/tag addition(s).")
+                return 0
+
+            cards = scan_collection(page, args.max_cards, args.scroll_delay_ms)
+            cards_needing_any_enabled_tag = [
+                card for card in cards if any(not has_target_tag(card, tag) for tag in enabled_tags)
+            ]
+            log(
+                f"Found {len(cards)} scanned card(s); {len(cards_needing_any_enabled_tag)} need at least one enabled tag check."
+            )
+
+            wikipedia = WikipediaClient(args.cache_path, args.wikipedia_delay_ms, args.wikipedia_batch_size)
+            metadata_by_title = wikipedia.fetch_many([card.title for card in cards_needing_any_enabled_tag])
+            candidates_by_tag: dict[str, list[CardRecord]] = {}
+            for tag in enabled_tags:
+                untagged_cards = [card for card in cards if not has_target_tag(card, tag)]
+                classifications[tag] = {
+                    card.key: classify_card_for_tag(tag, card, metadata_by_title.get(card.title))
+                    for card in untagged_cards
+                }
+                candidates_by_tag[tag] = [
+                    card for card in untagged_cards if classifications[tag][card.key].is_match
+                ]
+                log(
+                    f"Found {len(candidates_by_tag[tag])} untagged '{tag}' candidate card(s); "
+                    f"{len(cards) - len(untagged_cards)} already tagged."
+                )
+
+            total_candidates = sum(len(tag_candidates) for tag_candidates in candidates_by_tag.values())
+            write_candidate_artifact(args.candidate_path, cards, classifications, enabled_tags)
+            log(f"Wrote reusable candidates to {args.candidate_path}.")
+            write_report(
+                args.report_path,
+                cards,
+                classifications,
+                enabled_tags,
+                dry_run=dry_run,
+                sample_per_tag=args.sample_per_tag,
+            )
+            log(f"Wrote report to {args.report_path}.")
+
+            if dry_run or not total_candidates:
+                if dry_run:
+                    log("Dry run completed; no WikiMasters tags were changed.")
+                return 0
+
+            for tag in enabled_tags:
+                candidates = candidates_by_tag[tag]
+                if not candidates:
+                    continue
+                log(f"Applying '{tag}' to {len(candidates)} candidate card(s).")
+                applied[tag] = apply_tag_batches(
+                    page,
+                    candidates,
+                    tag,
+                    args.batch_size,
+                    args.selection_delay_ms,
+                    args.batch_delay_ms,
+                )
+
+            write_report(
+                args.report_path,
+                cards,
+                classifications,
+                enabled_tags,
+                dry_run=False,
+                applied=applied,
+                sample_per_tag=args.sample_per_tag,
+            )
+            total_applied = sum(len(tag_cards) for tag_cards in applied.values())
+            log(f"Run completed successfully. Applied {total_applied} card/tag addition(s).")
+            return 0
+        except Exception as exc:
+            log(f"Run failed: {exc}")
+            if cards and classifications:
+                write_report(
+                    args.report_path,
+                    cards,
+                    classifications,
+                    enabled_tags,
+                    dry_run=dry_run,
+                    applied=applied,
+                    sample_per_tag=args.sample_per_tag,
+                )
+            save_failure_artifacts(page, "wikimasters-tag-cards-failure")
+            return 1
+        finally:
+            context.close()
+            browser.close()
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+    return run(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

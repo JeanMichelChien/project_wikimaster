@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Open available WikiMasters packs and reveal every card."""
+"""Open available WikiMasters packs and reveal every card.
+
+This script logs into WikiMasters, opens packs from the pulls page until none
+are available or the configured limit is reached, records each visible card,
+and writes a GitHub Actions summary when running in CI.
+"""
 
 from __future__ import annotations
 
@@ -62,6 +67,8 @@ RARITY_RANK = {
 
 @dataclass(frozen=True)
 class CardRecord:
+    """One card revealed while opening a pack."""
+
     pack: int
     card: int | None
     total: int | None
@@ -82,6 +89,8 @@ def required_env(name: str) -> str:
 
 
 def get_first_visible(candidates: Iterable[Locator], timeout_ms: int = 1_500) -> Locator | None:
+    """Return the first locator that becomes visible from a fallback list."""
+
     for locator in candidates:
         candidate = locator.first
         try:
@@ -95,6 +104,8 @@ def get_first_visible(candidates: Iterable[Locator], timeout_ms: int = 1_500) ->
 
 
 def save_failure_artifacts(page: Page | None, reason: str) -> None:
+    """Write a small metadata file and screenshot when browser automation fails."""
+
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
     safe_reason = re.sub(r"[^a-zA-Z0-9_-]+", "-", reason).strip("-")[:60] or "failure"
 
@@ -168,6 +179,8 @@ def read_login_error(page: Page) -> str:
 
 
 def login_if_needed(page: Page, email: str, password: str) -> None:
+    """Authenticate if the pulls page redirects to the WikiMasters login form."""
+
     settle_page(page)
 
     if "/login" not in page.url and get_first_visible([page.get_by_text("Ouvrir", exact=True)], 1_000):
@@ -268,6 +281,8 @@ def read_pack_status(page: Page) -> str:
 
 
 def read_card_counter(page: Page) -> tuple[int, int] | None:
+    """Read the current 'Carte X / Y' counter from the page body."""
+
     try:
         body_text = page.locator("body").inner_text(timeout=2_000)
     except PlaywrightError:
@@ -281,6 +296,8 @@ def read_card_counter(page: Page) -> tuple[int, int] | None:
 
 
 def normalize_visible_lines(text: str) -> list[str]:
+    """Split browser text into non-empty, whitespace-normalized lines."""
+
     lines = []
     for line in text.splitlines():
         normalized = re.sub(r"\s+", " ", line).strip()
@@ -290,6 +307,8 @@ def normalize_visible_lines(text: str) -> list[str]:
 
 
 def is_card_title_candidate(line: str) -> bool:
+    """Filter out common UI labels and counters while parsing card text."""
+
     normalized = line.lower()
     if RARITY_PATTERN.fullmatch(line):
         return False
@@ -330,6 +349,8 @@ def is_card_title_candidate(line: str) -> bool:
 
 
 def parse_card_from_text(text: str, counter: tuple[int, int] | None) -> tuple[str, str]:
+    """Extract the best card title and rarity from a card/modal text block."""
+
     lines = normalize_visible_lines(text)
     start_index = 0
     for index, line in enumerate(lines):
@@ -381,6 +402,8 @@ def parse_card_from_text(text: str, counter: tuple[int, int] | None) -> tuple[st
 
 
 def read_card_area_text(page: Page) -> str:
+    """Sample the modal/card area and return the most card-like visible text."""
+
     try:
         return page.evaluate(
             """
@@ -396,6 +419,8 @@ def read_card_area_text(page: Page) -> str:
               const rarityPattern = /^(L|UR|SR|R|PC|C)$/i;
               const candidates = [];
 
+              // The reveal modal has no stable card selector, so sample points
+              // near the expected card area and score parent nodes by rarity.
               for (const [xRatio, yRatio] of samples) {
                 let element = document.elementFromPoint(
                   window.innerWidth * xRatio,
@@ -461,6 +486,8 @@ def needs_card_details_retry(record: CardRecord) -> bool:
 
 
 def read_visible_card(page: Page, pack_index: int, counter: tuple[int, int] | None) -> CardRecord:
+    """Read the currently shown card, falling back to body text if needed."""
+
     card_area_text = read_card_area_text(page)
     name, rarity = parse_card_from_text(card_area_text, counter)
 
@@ -521,6 +548,8 @@ def markdown_cell(value: object) -> str:
 
 
 def write_card_summary(records: list[CardRecord]) -> None:
+    """Append opened cards to the GitHub Actions step summary when available."""
+
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if not summary_path:
         return
@@ -593,6 +622,8 @@ def click_right_arrow_by_role(page: Page) -> bool:
 
 
 def click_right_arrow_by_geometry(page: Page) -> bool:
+    """Click the modal next arrow by scoring likely controls near the card."""
+
     coords = page.evaluate(
         """
         () => {
@@ -658,6 +689,8 @@ def click_right_arrow(page: Page) -> bool:
 
 
 def reveal_current_pack(page: Page, pack_index: int, records: list[CardRecord]) -> None:
+    """Walk through all visible cards in the current opened pack."""
+
     counter = wait_for_card_counter(page)
     if counter:
         log(f"Pack opened. Card {counter[0]}/{counter[1]}.")
@@ -701,6 +734,8 @@ def reveal_current_pack(page: Page, pack_index: int, records: list[CardRecord]) 
 
 
 def open_all_available_packs(page: Page, records: list[CardRecord]) -> int:
+    """Open packs from the pulls page until none are available or limit is hit."""
+
     opened = 0
 
     for pack_index in range(1, MAX_PACKS_PER_RUN + 1):
@@ -730,6 +765,8 @@ def open_all_available_packs(page: Page, records: list[CardRecord]) -> int:
 
 
 def main() -> int:
+    """Run the browser session, collect card records, and handle failures."""
+
     email = required_env("WIKIMASTERS_EMAIL")
     password = required_env("WIKIMASTERS_PASSWORD")
     headless = os.environ.get("HEADLESS", "1").lower() not in {"0", "false", "no"}

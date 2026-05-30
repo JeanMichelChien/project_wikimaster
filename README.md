@@ -10,7 +10,7 @@ The project can run from a GitHub repository using GitHub Actions as the runner 
 .
 ├── .github/workflows/open-wikimasters-packs.yml
 ├── scripts/open_packs.py
-├── scripts/tag_plant_cards.py
+├── scripts/tag_collection_cards.py
 ├── tests/
 ├── requirements.txt
 ├── .gitignore
@@ -19,7 +19,7 @@ The project can run from a GitHub repository using GitHub Actions as the runner 
 
 - `.github/workflows/open-wikimasters-packs.yml` defines the manually dispatchable GitHub Actions job.
 - `scripts/open_packs.py` contains the browser automation.
-- `scripts/tag_plant_cards.py` scans the collection and tags actual plant taxon cards.
+- `scripts/tag_collection_cards.py` scans the collection and tags supported topic cards.
 - `tests/` contains unit tests for non-browser logic.
 - `requirements.txt` pins the Python Playwright dependency.
 - `.gitignore` keeps secrets, local environments, logs, and generated artifacts out of git.
@@ -174,26 +174,40 @@ WIKIMASTERS_PASSWORD=your-password
 HEADLESS=1
 ```
 
-### Tag Plant Cards
+### Tag Collection Cards
 
-The plant tagger is script-only and does not have a GitHub Actions workflow. It logs in with the same `WIKIMASTERS_EMAIL` and `WIKIMASTERS_PASSWORD` environment variables, scans `https://www.wiki-masters.com/collection`, uses Wikipedia metadata to identify actual plant taxon cards, and writes a report to `artifacts/plant_tag_report.md`.
+The tagger is script-only and does not have a GitHub Actions workflow. It logs in with the same `WIKIMASTERS_EMAIL` and `WIKIMASTERS_PASSWORD` environment variables, scans `https://www.wiki-masters.com/collection` once, uses cached Wikipedia metadata, and writes a grouped report to `artifacts/tag_report.md`. It also writes reusable candidates to `artifacts/tag_candidates.json`, so applying after review can skip the full scan.
 
-Dry run is the default and does not change WikiMasters:
+Dry run is the default and does not change WikiMasters. By default it classifies all supported tags: `plante`, `philo`, `scam`, `train`, and `souterrains`.
 
 ```bash
-python3 scripts/tag_plant_cards.py
+python3 scripts/tag_collection_cards.py
 ```
 
-Apply the `plante` étiquette only after reviewing the dry-run report:
+Limit the dry-run report to selected tags:
 
 ```bash
-python3 scripts/tag_plant_cards.py --apply --batch-size 5
+python3 scripts/tag_collection_cards.py --tags philo,scam --sample-per-tag 10
+```
+
+Recommended local workflow:
+
+```bash
+python3 scripts/tag_collection_cards.py --tags plante
+less artifacts/tag_report.md
+python3 scripts/tag_collection_cards.py --apply-candidates --batch-size 1
+```
+
+The final command applies from `artifacts/tag_candidates.json` and only visits candidate pages. To force a fresh scan and apply in one command, use:
+
+```bash
+python3 scripts/tag_collection_cards.py --apply --tags plante,philo --batch-size 5
 ```
 
 For a small local test:
 
 ```bash
-HEADLESS=0 python3 scripts/tag_plant_cards.py --max-cards 50
+HEADLESS=0 python3 scripts/tag_collection_cards.py --max-cards 50
 ```
 
 ## Configuration
@@ -209,16 +223,19 @@ Optional environment variables:
 - `RIGHT_ARROW_ROLE_TIMEOUT_MS`: defaults to `100`. Short accessibility-selector fallback timeout for the right-arrow button.
 - `ARTIFACT_DIR`: defaults to `artifacts`. Directory for failure screenshots and metadata.
 
-Plant tagger CLI options:
+Collection tagger CLI options:
 
 - `--dry-run`: default. Report candidates without changing tags.
-- `--apply`: apply the target tag through the WikiMasters bulk selection UI.
-- `--target-tag`: defaults to `plante`.
+- `--apply`: apply matching tags through the WikiMasters bulk selection UI.
+- `--apply-candidates`: apply tags from `artifacts/tag_candidates.json` without rescanning the full collection.
+- `--tags`: comma-separated supported tags. Defaults to `plante,philo,scam,train,souterrains`.
+- `--sample-per-tag`: defaults to `10`. Limits rows shown per tag in the report only; it does not limit scanning or applying. Use `0` to show all candidates.
 - `--max-cards`: defaults to `0`, meaning scan all loaded collection cards.
 - `--batch-size`: defaults to `8`.
 - `--scroll-delay-ms`, `--selection-delay-ms`, `--batch-delay-ms`, and `--wikipedia-delay-ms`: throttling controls.
-- `--cache-path`: defaults to `artifacts/plant_wikipedia_cache.json`.
-- `--report-path`: defaults to `artifacts/plant_tag_report.md`.
+- `--cache-path`: defaults to `artifacts/wikimasters_wikipedia_cache.json`. If that file is missing, the script reuses the legacy `artifacts/plant_wikipedia_cache.json` cache before writing the new cache path.
+- `--report-path`: defaults to `artifacts/tag_report.md`.
+- `--candidate-path`: defaults to `artifacts/tag_candidates.json`.
 
 ## Failure Artifacts
 
