@@ -10,6 +10,8 @@ The project can run from a GitHub repository using GitHub Actions as the runner 
 .
 ├── .github/workflows/open-wikimasters-packs.yml
 ├── scripts/open_packs.py
+├── scripts/tag_plant_cards.py
+├── tests/
 ├── requirements.txt
 ├── .gitignore
 └── README.md
@@ -17,6 +19,8 @@ The project can run from a GitHub repository using GitHub Actions as the runner 
 
 - `.github/workflows/open-wikimasters-packs.yml` defines the manually dispatchable GitHub Actions job.
 - `scripts/open_packs.py` contains the browser automation.
+- `scripts/tag_plant_cards.py` scans the collection and tags actual plant taxon cards.
+- `tests/` contains unit tests for non-browser logic.
 - `requirements.txt` pins the Python Playwright dependency.
 - `.gitignore` keeps secrets, local environments, logs, and generated artifacts out of git.
 
@@ -144,22 +148,52 @@ gh workflow run open-wikimasters-packs.yml --ref main
 Create a virtual environment and install dependencies:
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install -r requirements.txt
-python -m playwright install chromium
+python3 -m pip install -r requirements.txt
+python3 -m playwright install chromium
 ```
 
 Run the script with local environment variables:
 
 ```bash
-WIKIMASTERS_EMAIL="your-email" WIKIMASTERS_PASSWORD="your-password" python scripts/open_packs.py
+python3 scripts/open_packs.py
 ```
 
 To see the browser while testing locally:
 
 ```bash
-HEADLESS=0 WIKIMASTERS_EMAIL="your-email" WIKIMASTERS_PASSWORD="your-password" python scripts/open_packs.py
+HEADLESS=0 python3 scripts/open_packs.py
+```
+
+For local runs, both scripts load credentials from `.env` automatically. GitHub does not expose secret values after they are saved, so fill `.env` once with the same values you originally stored as repository secrets:
+
+```dotenv
+WIKIMASTERS_EMAIL=you@example.com
+WIKIMASTERS_PASSWORD=your-password
+HEADLESS=1
+```
+
+### Tag Plant Cards
+
+The plant tagger is script-only and does not have a GitHub Actions workflow. It logs in with the same `WIKIMASTERS_EMAIL` and `WIKIMASTERS_PASSWORD` environment variables, scans `https://www.wiki-masters.com/collection`, uses Wikipedia metadata to identify actual plant taxon cards, and writes a report to `artifacts/plant_tag_report.md`.
+
+Dry run is the default and does not change WikiMasters:
+
+```bash
+python3 scripts/tag_plant_cards.py
+```
+
+Apply the `plante` étiquette only after reviewing the dry-run report:
+
+```bash
+python3 scripts/tag_plant_cards.py --apply --batch-size 5
+```
+
+For a small local test:
+
+```bash
+HEADLESS=0 python3 scripts/tag_plant_cards.py --max-cards 50
 ```
 
 ## Configuration
@@ -174,6 +208,17 @@ Optional environment variables:
 - `CARD_DETAILS_MAX_WAIT_MS`: defaults to `1200`. Maximum extra wait for card name and rarity after the card counter appears.
 - `RIGHT_ARROW_ROLE_TIMEOUT_MS`: defaults to `100`. Short accessibility-selector fallback timeout for the right-arrow button.
 - `ARTIFACT_DIR`: defaults to `artifacts`. Directory for failure screenshots and metadata.
+
+Plant tagger CLI options:
+
+- `--dry-run`: default. Report candidates without changing tags.
+- `--apply`: apply the target tag through the WikiMasters bulk selection UI.
+- `--target-tag`: defaults to `plante`.
+- `--max-cards`: defaults to `0`, meaning scan all loaded collection cards.
+- `--batch-size`: defaults to `8`.
+- `--scroll-delay-ms`, `--selection-delay-ms`, `--batch-delay-ms`, and `--wikipedia-delay-ms`: throttling controls.
+- `--cache-path`: defaults to `artifacts/plant_wikipedia_cache.json`.
+- `--report-path`: defaults to `artifacts/plant_tag_report.md`.
 
 ## Failure Artifacts
 

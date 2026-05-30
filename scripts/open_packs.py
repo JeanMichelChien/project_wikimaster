@@ -11,6 +11,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
+try:
+    from scripts.env_loader import load_env_file
+except ModuleNotFoundError:
+    from env_loader import load_env_file
+
 from playwright.sync_api import (
     Error as PlaywrightError,
     Locator,
@@ -19,6 +24,8 @@ from playwright.sync_api import (
     sync_playwright,
 )
 
+
+load_env_file(Path(os.environ.get("ENV_FILE", Path(__file__).resolve().parents[1] / ".env")))
 
 BASE_URL = "https://www.wiki-masters.com"
 PULLS_URL = f"{BASE_URL}/pulls"
@@ -120,6 +127,46 @@ def settle_page(page: Page) -> None:
         pass
 
 
+def wait_for_login_hydration(page: Page) -> None:
+    try:
+        page.wait_for_load_state("networkidle", timeout=5_000)
+    except PlaywrightTimeoutError:
+        pass
+    page.wait_for_timeout(500)
+
+
+def fill_login_input(locator: Locator, value: str) -> None:
+    locator.click()
+    locator.press("ControlOrMeta+A")
+    locator.press("Backspace")
+    locator.type(value, delay=5)
+    try:
+        if locator.input_value(timeout=1_000) != value:
+            locator.fill(value)
+    except PlaywrightError:
+        locator.fill(value)
+
+
+def read_login_error(page: Page) -> str:
+    try:
+        body_text = page.locator("body").inner_text(timeout=2_000)
+    except PlaywrightError:
+        return ""
+
+    normalized = re.sub(r"\s+", " ", body_text).lower()
+    known_errors = (
+        "missing email or phone",
+        "invalid login credentials",
+        "email not confirmed",
+        "too many requests",
+        "rate limit",
+    )
+    for error in known_errors:
+        if error in normalized:
+            return error
+    return ""
+
+
 def login_if_needed(page: Page, email: str, password: str) -> None:
     settle_page(page)
 
@@ -166,14 +213,30 @@ def login_if_needed(page: Page, email: str, password: str) -> None:
     if submit is None:
         raise RuntimeError("Could not find the Connexion button.")
 
-    submit.click()
-    try:
-        page.wait_for_url(re.compile(r".*/(pulls|paquets|collection|profile|profil).*"), timeout=DEFAULT_TIMEOUT_MS)
-    except PlaywrightTimeoutError:
-        settle_page(page)
+    login_error = ""
+    for attempt in range(1, 3):
+        wait_for_login_hydration(page)
+        fill_login_input(email_input, email)
+        fill_login_input(password_input, password)
+        page.wait_for_timeout(250)
 
-    if "/login" in page.url:
-        raise RuntimeError("Login did not complete; still on the login page.")
+        submit.click()
+        try:
+            page.wait_for_url(re.compile(r".*/(pulls|paquets|collection|profile|profil).*"), timeout=DEFAULT_TIMEOUT_MS)
+        except PlaywrightTimeoutError:
+            settle_page(page)
+
+        if "/login" not in page.url:
+            break
+
+        login_error = read_login_error(page)
+        if attempt == 1 and login_error == "missing email or phone":
+            log("Login form submitted before app state was ready; retrying once.")
+            continue
+        raise RuntimeError(
+            "Login did not complete; still on the login page"
+            + (f" ({login_error})." if login_error else ".")
+        )
 
     log("Login completed.")
 
