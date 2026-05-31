@@ -110,6 +110,18 @@ To force a fresh scan and apply in one command:
 python3 scripts/tag_collection_cards.py --apply --tags plante --batch-size 1
 ```
 
+Audit existing tags and report cards whose current tag no longer matches the classifier:
+
+```bash
+python3 scripts/tag_collection_cards.py --dry-run --tags plante --audit-existing --sample-per-tag 0
+```
+
+Remove invalid existing tags after an audit. This uses each card detail's tag remove button and verifies the tag is gone:
+
+```bash
+python3 scripts/tag_collection_cards.py --remove-invalid-existing --tags plante --batch-size 1
+```
+
 ### Sell `à bicrave` Cards
 
 The `à bicrave` tag is used to tag and sell shitty cards.
@@ -205,6 +217,8 @@ Tagger options:
 - `--dry-run`: default; report candidates without changing tags.
 - `--apply`: scan and apply matching tags through the bulk UI.
 - `--apply-candidates`: apply tags from `artifacts/tag_candidates.json` without a full rescan.
+- `--audit-existing`: include already-tagged cards in the report and show tags that no longer match.
+- `--remove-invalid-existing`: remove already-applied tags that fail the classifier. Requires explicit `--tags`.
 - `--tags`: comma-separated supported tags. Defaults to all supported tags.
 - `--sample-per-tag`: defaults to `10`; use `0` to show all candidates in the report.
 - `--max-cards`: defaults to `0`, meaning all collection cards.

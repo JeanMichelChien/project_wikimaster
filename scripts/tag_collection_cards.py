@@ -143,6 +143,35 @@ PLANT_CATEGORY_SUPPORT_PHRASES = (
     "angiosperme",
     "gymnosperme",
 )
+PLANT_HARD_NEGATIVE_PHRASES = (
+    "commune francaise",
+    "commune rurale",
+    "commune de",
+    "commune du",
+    "commune des",
+    "commune dans",
+    "municipalite",
+    "village",
+    "ville de",
+    "ville du",
+    "ville americaine",
+    "ville britannique",
+    "localite",
+    "hameau",
+    "census-designated place",
+    "joueur de hockey",
+    "joueuse de hockey",
+    "hockey",
+    "footballeur",
+    "footballeuse",
+    "sportif",
+    "sportive",
+    "club sportif",
+    "competition sportive",
+    "page d'homonymie",
+    "homonymie",
+    "page de liste",
+)
 NEGATIVE_CONTEXT_PHRASES = (
     "film",
     "acteur",
@@ -164,6 +193,11 @@ NEGATIVE_CONTEXT_PHRASES = (
     "roi",
     "reine",
     "football",
+    "hockey",
+    "joueur de hockey",
+    "joueuse de hockey",
+    "sportif",
+    "sportive",
     "mathematique",
     "maladie",
     "syndrome",
@@ -173,8 +207,16 @@ NEGATIVE_CONTEXT_PHRASES = (
     "societe",
     "langue",
     "pays",
+    "village",
+    "hameau",
+    "municipalite",
+    "localite",
+    "census-designated place",
     "guerre",
     "bataille",
+    "page d'homonymie",
+    "homonymie",
+    "page de liste",
 )
 
 PHILO_CORE_PHRASES = (
@@ -833,6 +875,13 @@ def parse_card_lines(lines: Sequence[str]) -> CardRecord | None:
         if not title:
             title = line
             continue
+        if (
+            not subtitle
+            and looks_like_tag_line(line)
+            and normalized_tag(line) in {normalized_tag(tag) for tag in SUPPORTED_TAGS}
+        ):
+            tags.append(line)
+            continue
         if not subtitle:
             subtitle = line
             continue
@@ -895,6 +944,7 @@ def classify_plante_card(card: CardRecord, metadata: WikipediaMetadata | None = 
         " ".join([metadata.description, card.subtitle]) if metadata else card.subtitle,
         NEGATIVE_CONTEXT_PHRASES,
     )
+    hard_negative = phrase_matches(" ".join([card.subtitle, description_text]), PLANT_HARD_NEGATIVE_PHRASES)
 
     if visible_taxon:
         score += 10
@@ -921,6 +971,9 @@ def classify_plante_card(card: CardRecord, metadata: WikipediaMetadata | None = 
     if metadata_negative:
         score -= 6
         reasons.append(f"metadata non-plant context: {metadata_negative[0]}")
+    if hard_negative:
+        score -= 20
+        reasons.append(f"hard non-plant context: {hard_negative[0]}")
 
     has_taxon_evidence = bool(
         visible_taxon
@@ -928,7 +981,7 @@ def classify_plante_card(card: CardRecord, metadata: WikipediaMetadata | None = 
         or extract_taxon
         or (category_taxon and looks_like_latin_taxon(card.title))
     )
-    is_match = has_taxon_evidence and score >= 4
+    is_match = has_taxon_evidence and score >= 4 and not hard_negative
     reason = unique_reason(reasons, "no plant taxon evidence found")
     return TagClassification(tag="plante", is_match=is_match, score=score, reason=reason)
 
@@ -1284,6 +1337,24 @@ def build_candidates_by_tag(
             for card in cards
             if not has_target_tag(card, tag)
             and classifications.get(tag, {}).get(card.key, TagClassification(tag, False, 0, "")).is_match
+        ]
+        for tag in tags
+    }
+
+
+def build_invalid_existing_by_tag(
+    cards: Sequence[CardRecord],
+    classifications: dict[str, dict[str, TagClassification]],
+    tags: Sequence[str],
+) -> dict[str, list[CardRecord]]:
+    """Return already-tagged cards that no longer satisfy their classifier."""
+
+    return {
+        tag: [
+            card
+            for card in cards
+            if has_target_tag(card, tag)
+            and not classifications.get(tag, {}).get(card.key, TagClassification(tag, False, 0, "")).is_match
         ]
         for tag in tags
     }
@@ -2136,6 +2207,8 @@ def find_visible_card_click_point(page: Page, card: CardRecord, selection_mode: 
           const subtitleNorm = normalize(subtitle);
           const rarityNorm = normalize(rarity);
           const rarityPattern = /^(L|UR|SR|R|PC|C)$/i;
+          const viewportTop = 80;
+          const viewportBottom = window.innerHeight - 90;
           const candidates = [];
 
           for (const element of document.querySelectorAll('article, a, button, [role="button"], [role="listitem"], div')) {
@@ -2148,8 +2221,8 @@ def find_visible_card_click_point(page: Page, card: CardRecord, selection_mode: 
               rect.width > 280 ||
               rect.height < 150 ||
               rect.height > 380 ||
-              rect.bottom < 0 ||
-              rect.top > window.innerHeight
+              rect.bottom < viewportTop ||
+              rect.top > viewportBottom
             ) {
               continue;
             }
@@ -2179,13 +2252,18 @@ def find_visible_card_click_point(page: Page, card: CardRecord, selection_mode: 
           if (selectionMode) {
             return {
               x: candidate.rect.right - Math.min(18, candidate.rect.width * 0.12),
-              y: candidate.rect.top + Math.min(28, candidate.rect.height * 0.14),
+              y: Math.min(
+                Math.max(candidate.rect.top + Math.min(28, candidate.rect.height * 0.14), viewportTop),
+                viewportBottom
+              ),
             };
           }
 
+          const visibleTop = Math.max(candidate.rect.top, viewportTop);
+          const visibleBottom = Math.min(candidate.rect.bottom, viewportBottom);
           return {
             x: candidate.rect.left + candidate.rect.width / 2,
-            y: candidate.rect.top + candidate.rect.height / 2,
+            y: visibleTop + (visibleBottom - visibleTop) / 2,
           };
         }
         """,
@@ -2386,9 +2464,9 @@ def click_confirmation_if_present(page: Page) -> None:
         [
             page.get_by_role(
                 "button",
-                name=re.compile("appliquer|ajouter|enregistrer|valider|confirmer", re.IGNORECASE),
+                name=re.compile("appliquer|ajouter|retirer|enlever|supprimer|enregistrer|valider|confirmer", re.IGNORECASE),
             ),
-            page.get_by_text(re.compile("appliquer|ajouter|enregistrer|valider|confirmer", re.IGNORECASE)),
+            page.get_by_text(re.compile("appliquer|ajouter|retirer|enlever|supprimer|enregistrer|valider|confirmer", re.IGNORECASE)),
         ],
         timeout_ms=800,
     )
@@ -2433,12 +2511,12 @@ def click_bulk_result_close(page: Page) -> None:
             const style = window.getComputedStyle(element);
             return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
           };
-          const dialogs = [...document.querySelectorAll('[role="dialog"], [aria-modal="true"], div')]
+              const dialogs = [...document.querySelectorAll('[role="dialog"], [aria-modal="true"], div')]
             .map((element) => {
               const rect = element.getBoundingClientRect();
               if (!isVisible(element, rect)) return null;
               const text = normalize(element.innerText || '');
-              if (!/(carte etiquetee|deja etiquetee|appliquer une etiquette)/.test(text)) return null;
+              if (!/(carte etiquetee|deja etiquetee|appliquer une etiquette|retirer une etiquette|etiquette retiree|cartes? modifiees?|mise a jour)/.test(text)) return null;
               return { element, rect, area: rect.width * rect.height };
             })
             .filter(Boolean)
@@ -2496,9 +2574,21 @@ def add_tag_to_selected(page: Page, target_tag: str) -> BulkTagResult | None:
     return None
 
 
+def same_card_identity(left: CardRecord, right: CardRecord) -> bool:
+    """Compare scanned cards by stable visible identity rather than page position."""
+
+    if normalize_text(left.title) != normalize_text(right.title):
+        return False
+    if left.rarity and right.rarity and left.rarity.upper() != right.rarity.upper():
+        return False
+    if left.subtitle and right.subtitle and normalize_text(left.subtitle) != normalize_text(right.subtitle):
+        return False
+    return True
+
+
 def visible_card_has_tag(page: Page, card: CardRecord, target_tag: str) -> bool:
     for visible_card in extract_visible_cards(page):
-        if normalize_text(visible_card.title) == normalize_text(card.title):
+        if same_card_identity(visible_card, card):
             return has_target_tag(visible_card, target_tag)
     return False
 
@@ -2543,6 +2633,191 @@ def verify_batch_tags(page: Page, batch: Sequence[CardRecord], target_tag: str, 
 
     if missing:
         raise RuntimeError(f"Tag verification failed for: {', '.join(missing)}")
+
+
+def card_tag_status_by_search(page: Page, card: CardRecord, target_tag: str, delay_ms: int) -> bool | None:
+    """Search for one card and return whether it still carries a target tag."""
+
+    page.goto(COLLECTION_URL, wait_until="domcontentloaded")
+    settle_page(page)
+    filter_collection(page, card.title, delay_ms)
+    reset_collection_scroll(page)
+    ui_pause(page, delay_ms)
+    stagnant_rounds = 0
+
+    while True:
+        for visible_card in extract_visible_cards(page):
+            if same_card_identity(visible_card, card):
+                return has_target_tag(visible_card, target_tag)
+
+        metrics = read_collection_scroll_metrics(page)
+        if metrics["atBottom"] and stagnant_rounds >= 2:
+            return None
+
+        previous_scroll_top = metrics["scrollTop"]
+        metrics = scroll_collection(page)
+        ui_pause(page, delay_ms)
+        if metrics["scrollTop"] == previous_scroll_top:
+            stagnant_rounds += 1
+        else:
+            stagnant_rounds = 0
+
+
+def verify_batch_tags_removed(page: Page, batch: Sequence[CardRecord], target_tag: str, delay_ms: int) -> None:
+    """Search each card after removal and confirm the target tag is gone."""
+
+    still_tagged: list[str] = []
+    for card in batch:
+        status = card_tag_status_by_search(page, card, target_tag, delay_ms)
+        if status is True:
+            still_tagged.append(card.title)
+        elif status is None:
+            log(f"Could not find '{card.title}' during post-removal search verification; relying on removed detail chip.")
+
+    errors = []
+    if still_tagged:
+        errors.append(f"still tagged: {', '.join(still_tagged)}")
+    if errors:
+        raise RuntimeError("Tag removal verification failed; " + "; ".join(errors))
+
+
+def read_card_detail_text(page: Page) -> str:
+    """Return text from the open card detail dialog, excluding the dimmed collection."""
+
+    try:
+        return str(
+            page.evaluate(
+                """
+                () => {
+                  const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                  const isVisible = (element, rect) => {
+                    const style = window.getComputedStyle(element);
+                    return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+                  };
+                  const dialogs = [...document.querySelectorAll('[role="dialog"], [aria-modal="true"], div')]
+                    .map((element) => {
+                      const rect = element.getBoundingClientRect();
+                      if (!isVisible(element, rect)) return null;
+                      if (rect.width < 360 || rect.height < 320) return null;
+                      const text = normalize(element.innerText || '');
+                      if (!/mettre aux encheres|mettre aux enchères|q-score/.test(text.toLowerCase())) {
+                        return null;
+                      }
+                      return { text, area: rect.width * rect.height };
+                    })
+                    .filter(Boolean)
+                    .sort((a, b) => a.area - b.area);
+                  return dialogs[0]?.text || '';
+                }
+                """
+            )
+        )
+    except PlaywrightError:
+        return ""
+
+
+def card_detail_matches(page: Page, card: CardRecord) -> bool:
+    """Confirm the open detail modal belongs to the card we intend to mutate."""
+
+    detail_text = normalize_text(read_card_detail_text(page))
+    if not detail_text:
+        return False
+    if normalize_text(card.title) not in detail_text:
+        return False
+    if card.subtitle and normalize_text(card.subtitle) not in detail_text:
+        return False
+    return True
+
+
+def close_card_detail(page: Page) -> None:
+    """Close an open card detail modal without touching card data."""
+
+    close_button = get_first_visible(
+        [
+            page.get_by_role("button", name=re.compile("^fermer$|^close$", re.IGNORECASE)),
+            page.get_by_text(re.compile("^fermer$|^close$", re.IGNORECASE)),
+        ],
+        timeout_ms=800,
+    )
+    if close_button is not None:
+        try:
+            close_button.click(timeout=2_000)
+            ui_pause(page, 500)
+            return
+        except PlaywrightError:
+            pass
+    try:
+        page.keyboard.press("Escape")
+        ui_pause(page, 500)
+    except PlaywrightError:
+        pass
+
+
+def open_card_detail_with_fallback(page: Page, card: CardRecord, delay_ms: int) -> None:
+    """Open one exact card detail, checking the modal title before any mutation."""
+
+    candidate_pages = nearby_page_numbers(card.page_number, card.page_total) or (card.page_number,)
+    for page_number in candidate_pages:
+        if page_number is None:
+            continue
+        page.goto(COLLECTION_URL, wait_until="domcontentloaded")
+        settle_page(page)
+        go_to_collection_page(page, page_number)
+        clear_collection_filter(page, delay_ms)
+        point = find_card_click_point_by_scrolling(page, card, delay_ms, selection_mode=False)
+        if point is None:
+            continue
+        page.mouse.click(point["x"], point["y"])
+        ui_pause(page, 1_000)
+        if card_detail_matches(page, card):
+            return
+        close_card_detail(page)
+
+    page.goto(COLLECTION_URL, wait_until="domcontentloaded")
+    settle_page(page)
+    filter_collection(page, card.title, delay_ms)
+    ui_pause(page, 1_000)
+    point = find_visible_card_click_point(page, card, selection_mode=False)
+    if point is not None:
+        page.mouse.click(point["x"], point["y"])
+        ui_pause(page, 1_000)
+        if card_detail_matches(page, card):
+            return
+        close_card_detail(page)
+
+    raise RuntimeError(f"Could not open exact card detail for tag removal: {card.title}")
+
+
+def remove_tag_from_card_detail(page: Page, card: CardRecord, target_tag: str, delay_ms: int) -> None:
+    """Remove an existing tag via the card detail chip's X button."""
+
+    open_card_detail_with_fallback(page, card, delay_ms)
+    remove_pattern = re.compile(
+        rf"retirer.*[ée]tiquette.*{re.escape(target_tag)}|retirer.*etiquette.*{re.escape(target_tag)}",
+        re.IGNORECASE,
+    )
+    remove_button = get_first_visible(
+        [
+            page.get_by_role("button", name=remove_pattern),
+            page.get_by_text(remove_pattern),
+        ],
+        timeout_ms=1_500,
+    )
+    if remove_button is None:
+        close_card_detail(page)
+        raise RuntimeError(f"Could not find remove button for tag '{target_tag}' on {card.title}.")
+
+    remove_button.click(timeout=3_000)
+    ui_pause(page, delay_ms)
+    for _ in range(5):
+        still_present = get_first_visible([page.get_by_role("button", name=remove_pattern)], timeout_ms=300)
+        if still_present is None:
+            close_card_detail(page)
+            return
+        ui_pause(page, delay_ms)
+
+    close_card_detail(page)
+    raise RuntimeError(f"Tag chip '{target_tag}' was still visible after removal click on {card.title}.")
 
 
 def iter_page_batches(cards: Sequence[CardRecord], batch_size: int) -> Iterable[tuple[int | None, list[CardRecord]]]:
@@ -2607,6 +2882,31 @@ def apply_tag_batches(
     return applied
 
 
+def remove_tag_batches(
+    page: Page,
+    cards: Sequence[CardRecord],
+    target_tag: str,
+    batch_size: int,
+    selection_delay_ms: int,
+    batch_delay_ms: int,
+) -> list[CardRecord]:
+    """Remove one target tag from already-tagged cards via verified detail chips."""
+
+    removed: list[CardRecord] = []
+    batches = list(iter_page_batches(cards, batch_size))
+    for batch_index, (page_number, batch) in enumerate(batches, start=1):
+        page_hint = f" on page {page_number}" if page_number else ""
+        log(f"Removing '{target_tag}' from {len(batch)} card(s){page_hint} for removal batch {batch_index}/{len(batches)}.")
+        for card in batch:
+            remove_tag_from_card_detail(page, card, target_tag, selection_delay_ms)
+            verify_batch_tags_removed(page, [card], target_tag, selection_delay_ms)
+            removed.append(card)
+            log(f"Removed '{target_tag}' from {len(removed)}/{len(cards)} invalid existing card(s).")
+            ui_pause(page, batch_delay_ms)
+
+    return removed
+
+
 def write_report(
     path: Path,
     cards: Sequence[CardRecord],
@@ -2614,20 +2914,27 @@ def write_report(
     tags: Sequence[str],
     dry_run: bool,
     applied: dict[str, Sequence[CardRecord]] | None = None,
+    invalid_existing: dict[str, Sequence[CardRecord]] | None = None,
+    removed: dict[str, Sequence[CardRecord]] | None = None,
     sample_per_tag: int = 10,
 ) -> None:
     """Write a grouped Markdown report for dry-run review or apply results."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
     applied = applied or {}
+    invalid_existing = invalid_existing or {}
+    removed = removed or {}
     already_tagged_by_tag: dict[str, list[CardRecord]] = {}
     applied_keys_by_tag = {tag: {card.key for card in applied_cards} for tag, applied_cards in applied.items()}
+    removed_keys_by_tag = {tag: {card.key for card in removed_cards} for tag, removed_cards in removed.items()}
     candidates_by_tag = build_candidates_by_tag(cards, classifications, tags)
     for tag in tags:
         already_tagged_by_tag[tag] = [card for card in cards if has_target_tag(card, tag)]
 
     total_candidates = sum(len(cards_for_tag) for cards_for_tag in candidates_by_tag.values())
     total_applied = sum(len(cards_for_tag) for cards_for_tag in applied.values())
+    total_invalid_existing = sum(len(cards_for_tag) for cards_for_tag in invalid_existing.values())
+    total_removed = sum(len(cards_for_tag) for cards_for_tag in removed.values())
     sample_label = "all" if sample_per_tag <= 0 else str(sample_per_tag)
 
     lines = [
@@ -2640,9 +2947,11 @@ def write_report(
         f"- Cards scanned: {len(cards)}",
         f"- Candidate card/tag additions: {total_candidates}",
         f"- Card/tag additions applied this run: {total_applied}",
+        f"- Invalid existing card/tag assignments: {total_invalid_existing}",
+        f"- Invalid existing card/tag assignments removed this run: {total_removed}",
         "",
-        "| Tag | Already tagged | Candidates needing tag | Applied this run |",
-        "|---|---:|---:|---:|",
+        "| Tag | Already tagged | Candidates needing tag | Applied this run | Invalid existing | Removed invalid |",
+        "|---|---:|---:|---:|---:|---:|",
     ]
 
     for tag in tags:
@@ -2654,13 +2963,15 @@ def write_report(
                     markdown_cell(len(already_tagged_by_tag[tag])),
                     markdown_cell(len(candidates_by_tag[tag])),
                     markdown_cell(len(applied.get(tag, ()))),
+                    markdown_cell(len(invalid_existing.get(tag, ()))),
+                    markdown_cell(len(removed.get(tag, ()))),
                 ]
             )
             + " |"
         )
 
-    if not total_candidates:
-        lines.extend(["", "No untagged candidate cards were found for the enabled tags."])
+    if not total_candidates and not total_invalid_existing:
+        lines.extend(["", "No untagged candidate cards or invalid existing tags were found for the enabled tags."])
 
     for tag in tags:
         definition = TAG_DEFINITIONS[tag]
@@ -2668,19 +2979,58 @@ def write_report(
         lines.extend(["", f"## `{tag}`", "", definition.description, ""])
         if not candidates:
             lines.append("No untagged candidates found.")
+        else:
+            shown_candidates = candidates[:sample_per_tag] if sample_per_tag > 0 else candidates
+            hidden_count = len(candidates) - len(shown_candidates)
+            lines.extend(
+                [
+                    "| Title | Subtitle | Page | Rarity | Tags | Score | Reason | Action |",
+                    "|---|---|---:|---:|---|---:|---|---|",
+                ]
+            )
+            for card in shown_candidates:
+                classification = classifications[tag][card.key]
+                action = "applied" if card.key in applied_keys_by_tag.get(tag, set()) else ("would apply" if dry_run else "pending")
+                lines.append(
+                    "| "
+                    + " | ".join(
+                        [
+                            markdown_cell(card.title),
+                            markdown_cell(card.subtitle),
+                            markdown_cell(card.page_number or ""),
+                            markdown_cell(card.rarity),
+                            markdown_cell(", ".join(card.tags)),
+                            markdown_cell(classification.score),
+                            markdown_cell(classification.reason),
+                            markdown_cell(action),
+                        ]
+                    )
+                    + " |"
+                )
+            if hidden_count > 0:
+                lines.append("")
+                lines.append(f"{hidden_count} additional `{tag}` candidate(s) omitted by `--sample-per-tag`.")
+
+        invalid_cards = list(invalid_existing.get(tag, ()))
+        lines.extend(["", f"### Invalid Existing `{tag}` Tags", ""])
+        if not invalid_cards:
+            lines.append("No invalid existing tags found.")
             continue
 
-        shown_candidates = candidates[:sample_per_tag] if sample_per_tag > 0 else candidates
-        hidden_count = len(candidates) - len(shown_candidates)
+        shown_invalid = invalid_cards[:sample_per_tag] if sample_per_tag > 0 else invalid_cards
+        hidden_invalid_count = len(invalid_cards) - len(shown_invalid)
         lines.extend(
             [
                 "| Title | Subtitle | Page | Rarity | Tags | Score | Reason | Action |",
                 "|---|---|---:|---:|---|---:|---|---|",
             ]
         )
-        for card in shown_candidates:
+        for card in shown_invalid:
             classification = classifications[tag][card.key]
-            action = "applied" if card.key in applied_keys_by_tag.get(tag, set()) else ("would apply" if dry_run else "pending")
+            if card.key in removed_keys_by_tag.get(tag, set()):
+                action = "removed"
+            else:
+                action = "would remove" if dry_run else "pending removal"
             lines.append(
                 "| "
                 + " | ".join(
@@ -2697,9 +3047,9 @@ def write_report(
                 )
                 + " |"
             )
-        if hidden_count > 0:
+        if hidden_invalid_count > 0:
             lines.append("")
-            lines.append(f"{hidden_count} additional `{tag}` candidate(s) omitted by `--sample-per-tag`.")
+            lines.append(f"{hidden_invalid_count} additional invalid existing `{tag}` tag(s) omitted by `--sample-per-tag`.")
 
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -2724,12 +3074,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Apply tags from the saved candidate JSON without rescanning the full collection.",
     )
+    mode.add_argument(
+        "--remove-invalid-existing",
+        action="store_true",
+        help="Remove enabled tags from already-tagged cards that no longer match the classifier.",
+    )
     parser.add_argument(
         "--tags",
         default=None,
         help=f"Comma-separated tags to classify. Defaults to all supported tags: {DEFAULT_TAGS}.",
     )
     parser.add_argument("--target-tag", default=None, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--audit-existing",
+        action="store_true",
+        help="Also classify already-tagged cards and report existing tags that should be removed.",
+    )
     parser.add_argument("--sample-per-tag", type=int, default=10, help="Maximum candidates shown per tag in the report. 0 shows all.")
     parser.add_argument("--max-cards", type=int, default=0, help="Maximum cards to scan. 0 means all loaded cards.")
     parser.add_argument("--batch-size", type=int, default=8, help="Cards to select and tag per mutation batch.")
@@ -2762,12 +3122,15 @@ def run(args: argparse.Namespace) -> int:
     if sync_playwright is None:
         raise RuntimeError("Playwright is not installed. Run `python -m pip install -r requirements.txt` first.")
 
-    dry_run = not args.apply and not args.apply_candidates
+    dry_run = not args.apply and not args.apply_candidates and not args.remove_invalid_existing
+    audit_existing = args.audit_existing or args.remove_invalid_existing
     email = required_env("WIKIMASTERS_EMAIL")
     password = required_env("WIKIMASTERS_PASSWORD")
     headless = os.environ.get("HEADLESS", "1").lower() not in {"0", "false", "no"}
     if args.tags and args.target_tag:
         raise RuntimeError("Use either --tags or the legacy --target-tag option, not both.")
+    if args.remove_invalid_existing and not (args.tags or args.target_tag):
+        raise RuntimeError("--remove-invalid-existing requires an explicit --tags value.")
     if args.apply_candidates and not args.tags and not args.target_tag:
         enabled_tags: tuple[str, ...] = ()
     else:
@@ -2790,6 +3153,8 @@ def run(args: argparse.Namespace) -> int:
     cards: list[CardRecord] = []
     classifications: dict[str, dict[str, TagClassification]] = {}
     applied: dict[str, list[CardRecord]] = {tag: [] for tag in enabled_tags}
+    invalid_existing: dict[str, list[CardRecord]] = {tag: [] for tag in enabled_tags}
+    removed: dict[str, list[CardRecord]] = {tag: [] for tag in enabled_tags}
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=headless)
@@ -2838,29 +3203,39 @@ def run(args: argparse.Namespace) -> int:
                 return 0
 
             cards = scan_collection(page, args.max_cards, args.scroll_delay_ms)
-            cards_needing_any_enabled_tag = [
-                card for card in cards if any(not has_target_tag(card, tag) for tag in enabled_tags)
+            cards_needing_any_enabled_tag_check = [
+                card
+                for card in cards
+                if any(not has_target_tag(card, tag) or (audit_existing and has_target_tag(card, tag)) for tag in enabled_tags)
             ]
             log(
-                f"Found {len(cards)} scanned card(s); {len(cards_needing_any_enabled_tag)} need at least one enabled tag check."
+                f"Found {len(cards)} scanned card(s); {len(cards_needing_any_enabled_tag_check)} "
+                "need at least one enabled tag check."
             )
 
             wikipedia = WikipediaClient(args.cache_path, args.wikipedia_delay_ms, args.wikipedia_batch_size)
-            metadata_by_title = wikipedia.fetch_many([card.title for card in cards_needing_any_enabled_tag])
+            metadata_by_title = wikipedia.fetch_many([card.title for card in cards_needing_any_enabled_tag_check])
             candidates_by_tag: dict[str, list[CardRecord]] = {}
             for tag in enabled_tags:
                 untagged_cards = [card for card in cards if not has_target_tag(card, tag)]
+                tagged_cards = [card for card in cards if has_target_tag(card, tag)]
+                cards_to_classify = untagged_cards + (tagged_cards if audit_existing else [])
                 classifications[tag] = {
                     card.key: classify_card_for_tag(tag, card, metadata_by_title.get(card.title))
-                    for card in untagged_cards
+                    for card in cards_to_classify
                 }
                 candidates_by_tag[tag] = [
                     card for card in untagged_cards if classifications[tag][card.key].is_match
                 ]
+                invalid_existing[tag] = [
+                    card for card in tagged_cards if not classifications.get(tag, {}).get(card.key, TagClassification(tag, False, 0, "")).is_match
+                ] if audit_existing else []
                 log(
                     f"Found {len(candidates_by_tag[tag])} untagged '{tag}' candidate card(s); "
                     f"{len(cards) - len(untagged_cards)} already tagged."
                 )
+                if audit_existing:
+                    log(f"Found {len(invalid_existing[tag])} invalid existing '{tag}' tag(s).")
 
             total_candidates = sum(len(tag_candidates) for tag_candidates in candidates_by_tag.values())
             write_candidate_artifact(args.candidate_path, cards, classifications, enabled_tags)
@@ -2871,9 +3246,45 @@ def run(args: argparse.Namespace) -> int:
                 classifications,
                 enabled_tags,
                 dry_run=dry_run,
+                invalid_existing=invalid_existing if audit_existing else None,
                 sample_per_tag=args.sample_per_tag,
             )
             log(f"Wrote report to {args.report_path}.")
+
+            if args.remove_invalid_existing:
+                total_invalid_existing = sum(len(tag_cards) for tag_cards in invalid_existing.values())
+                if not total_invalid_existing:
+                    log("No invalid existing tags found to remove.")
+                    return 0
+                for tag in enabled_tags:
+                    invalid_cards = invalid_existing[tag]
+                    if args.max_apply_candidates:
+                        invalid_cards = invalid_cards[: args.max_apply_candidates]
+                    if not invalid_cards:
+                        continue
+                    log(f"Removing invalid existing '{tag}' tag from {len(invalid_cards)} card(s).")
+                    removed[tag] = remove_tag_batches(
+                        page,
+                        invalid_cards,
+                        tag,
+                        args.batch_size,
+                        args.selection_delay_ms,
+                        args.batch_delay_ms,
+                    )
+
+                write_report(
+                    args.report_path,
+                    cards,
+                    classifications,
+                    enabled_tags,
+                    dry_run=False,
+                    invalid_existing=invalid_existing,
+                    removed=removed,
+                    sample_per_tag=args.sample_per_tag,
+                )
+                total_removed = sum(len(tag_cards) for tag_cards in removed.values())
+                log(f"Run completed successfully. Removed {total_removed} invalid existing card/tag assignment(s).")
+                return 0
 
             if dry_run or not total_candidates:
                 if dry_run:
@@ -2903,6 +3314,7 @@ def run(args: argparse.Namespace) -> int:
                 enabled_tags,
                 dry_run=False,
                 applied=applied,
+                invalid_existing=invalid_existing if audit_existing else None,
                 sample_per_tag=args.sample_per_tag,
             )
             total_applied = sum(len(tag_cards) for tag_cards in applied.values())
@@ -2918,6 +3330,8 @@ def run(args: argparse.Namespace) -> int:
                     enabled_tags,
                     dry_run=dry_run,
                     applied=applied,
+                    invalid_existing=invalid_existing if audit_existing else None,
+                    removed=removed,
                     sample_per_tag=args.sample_per_tag,
                 )
             save_failure_artifacts(page, "wikimasters-tag-cards-failure")

@@ -16,6 +16,7 @@ from scripts.tag_collection_cards import (
     CardRecord,
     TagClassification,
     WikipediaMetadata,
+    build_invalid_existing_by_tag,
     classify_card_for_tag,
     classify_plant_card,
     has_tag,
@@ -185,6 +186,74 @@ class TopicClassifierTests(unittest.TestCase):
 
         self.assertFalse(classification.is_plant_related)
 
+    def test_place_with_floral_category_is_not_plant_related(self) -> None:
+        card = make_card("Monistrol-sur-Loire", "commune française du département de la Haute-Loire", tags=("plante",))
+        metadata = WikipediaMetadata(
+            title="Monistrol-sur-Loire",
+            description="commune française du département de la Haute-Loire",
+            extract="Monistrol-sur-Loire est une commune française.",
+            categories=("Villes et villages fleuris", "Plante à fleurs"),
+        )
+
+        classification = classify_plant_card(card, metadata)
+
+        self.assertFalse(classification.is_plant_related)
+        self.assertIn("hard non-plant context", classification.reason)
+
+    def test_village_tagged_as_plant_is_invalid(self) -> None:
+        card = make_card("Dobra Voda", "village croate", tags=("plante",))
+        metadata = WikipediaMetadata(
+            title="Dobra Voda",
+            description="village croate",
+            categories=("Village de Croatie", "Villes et villages fleuris"),
+        )
+
+        classification = classify_plant_card(card, metadata)
+
+        self.assertFalse(classification.is_plant_related)
+
+    def test_hockey_card_tagged_as_plant_is_invalid(self) -> None:
+        card = make_card("Igor Makarov", "joueur de hockey sur glace russe", tags=("plante",))
+        metadata = WikipediaMetadata(
+            title="Igor Makarov",
+            description="joueur de hockey sur glace russe",
+            extract="Igor Makarov est un joueur de hockey sur glace.",
+            categories=("Joueur russe de hockey sur glace",),
+        )
+
+        classification = classify_plant_card(card, metadata)
+
+        self.assertFalse(classification.is_plant_related)
+
+    def test_homonymy_page_with_plant_mention_is_not_plant_related(self) -> None:
+        card = make_card("Mayna", "page d'homonymie de Wikimédia")
+        metadata = WikipediaMetadata(
+            title="Mayna",
+            description="page d'homonymie",
+            extract="Mayna peut designer un genre de plantes.",
+            categories=("Homonymie", "Végétal"),
+        )
+
+        classification = classify_plant_card(card, metadata)
+
+        self.assertFalse(classification.is_plant_related)
+
+    def test_invalid_existing_tag_builder_finds_tagged_non_matches(self) -> None:
+        plant = make_card("Ancolie", "genre de plantes", tags=("plante",))
+        village = make_card("Dobra Voda", "village croate", tags=("plante",))
+        untagged = make_card("Socrate", "philosophe grec")
+        classifications = {
+            "plante": {
+                plant.key: TagClassification("plante", True, 10, "visible plant taxon term"),
+                village.key: TagClassification("plante", False, -20, "hard non-plant context: village"),
+                untagged.key: TagClassification("plante", False, 0, "no plant taxon evidence found"),
+            }
+        }
+
+        invalid = build_invalid_existing_by_tag([plant, village, untagged], classifications, ("plante",))
+
+        self.assertEqual([card.title for card in invalid["plante"]], ["Dobra Voda"])
+
     def test_parse_card_lines_extracts_existing_tag(self) -> None:
         card = parse_card_lines(["UR", "Ancolie", "genre de plantes", "plante", "7 201", "4 598"])
 
@@ -193,6 +262,15 @@ class TopicClassifierTests(unittest.TestCase):
         self.assertEqual(card.title, "Ancolie")
         self.assertEqual(card.subtitle, "genre de plantes")
         self.assertTrue(has_tag(card, "plante"))
+
+    def test_parse_card_lines_treats_lone_supported_tag_as_tag_not_subtitle(self) -> None:
+        card = parse_card_lines(["C", "Ytteren", "plante", "5 100", "4 900"])
+
+        self.assertIsNotNone(card)
+        assert card is not None
+        self.assertEqual(card.title, "Ytteren")
+        self.assertEqual(card.subtitle, "")
+        self.assertEqual(card.tags, ("plante",))
 
     def test_parse_tags_arg_validates_supported_tags(self) -> None:
         self.assertEqual(parse_tags_arg("plante,philo,plante"), ("plante", "philo"))
