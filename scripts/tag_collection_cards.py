@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -57,6 +58,8 @@ LEGACY_CACHE_PATH = ARTIFACT_DIR / "plant_wikipedia_cache.json"
 DEFAULT_REPORT_PATH = ARTIFACT_DIR / "tag_report.md"
 DEFAULT_CANDIDATE_PATH = ARTIFACT_DIR / "tag_candidates.json"
 DEFAULT_TIMEOUT_MS = 12_000
+DEFAULT_UI_JITTER_MS = 80
+UI_JITTER_MS = int(os.environ.get("WIKIMASTERS_UI_JITTER_MS", str(DEFAULT_UI_JITTER_MS)))
 RARITY_PATTERN = re.compile(r"^(L|UR|SR|R|PC|C)$", re.IGNORECASE)
 PAGE_COUNTER_PATTERN = re.compile(r"Page\s+(\d+)\s*/\s*(\d+)", re.IGNORECASE)
 SUPPORTED_TAGS = ("plante", "philo", "scam", "train", "souterrains", "à bicrave")
@@ -702,6 +705,20 @@ class CandidateArtifact:
 def log(message: str) -> None:
     timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     print(f"[{timestamp}] {message}", flush=True)
+
+
+def set_ui_jitter_ms(value: int) -> None:
+    """Set the tiny extra UI pause used after scripted browser actions."""
+
+    global UI_JITTER_MS
+    UI_JITTER_MS = max(0, value)
+
+
+def ui_pause(page: Page, base_ms: int) -> None:
+    """Wait for a base delay plus a short bounded jitter to avoid hammering UI events."""
+
+    jitter_ms = random.randint(0, UI_JITTER_MS) if UI_JITTER_MS > 0 else 0
+    page.wait_for_timeout(max(0, base_ms) + jitter_ms)
 
 
 def required_env(name: str) -> str:
@@ -1415,7 +1432,7 @@ def wait_for_login_hydration(page: Page) -> None:
         page.wait_for_load_state("networkidle", timeout=5_000)
     except PlaywrightTimeoutError:
         pass
-    page.wait_for_timeout(500)
+    ui_pause(page, 500)
 
 
 def fill_login_input(locator: Locator, value: str) -> None:
@@ -1504,7 +1521,7 @@ def login_if_needed(page: Page, email: str, password: str) -> None:
         wait_for_login_hydration(page)
         fill_login_input(email_input, email)
         fill_login_input(password_input, password)
-        page.wait_for_timeout(250)
+        ui_pause(page, 250)
 
         submit.click()
         try:
@@ -1735,16 +1752,16 @@ def click_next_collection_page(page: Page) -> bool:
 
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
-        page.wait_for_timeout(250)
+        ui_pause(page, 250)
         counter = read_collection_page_counter(page)
         signature = visible_card_signature(page)
         if previous_counter and counter and counter[0] != previous_counter[0]:
             reset_collection_scroll(page)
-            page.wait_for_timeout(300)
+            ui_pause(page, 300)
             return True
         if not previous_counter and signature and signature != previous_signature:
             reset_collection_scroll(page)
-            page.wait_for_timeout(300)
+            ui_pause(page, 300)
             return True
 
     return False
@@ -1772,7 +1789,7 @@ def go_to_collection_page(page: Page, target_page: int | None) -> None:
         raise RuntimeError(f"Expected collection page {target_page}, but reached page {current_page}.")
 
     reset_collection_scroll(page)
-    page.wait_for_timeout(300)
+    ui_pause(page, 300)
 
 
 def nearby_page_numbers(page_number: int | None, page_total: int | None, radius: int = 3) -> tuple[int, ...]:
@@ -1805,7 +1822,7 @@ def scan_collection_page(page: Page, max_cards: int, scroll_delay_ms: int) -> li
     initial_deadline = time.monotonic() + 15
 
     reset_collection_scroll(page)
-    page.wait_for_timeout(scroll_delay_ms)
+    ui_pause(page, scroll_delay_ms)
 
     while time.monotonic() < initial_deadline:
         initial_cards = extract_visible_cards(page)
@@ -1813,7 +1830,7 @@ def scan_collection_page(page: Page, max_cards: int, scroll_delay_ms: int) -> li
             for card in initial_cards:
                 records.setdefault(card.key, card)
             break
-        page.wait_for_timeout(500)
+        ui_pause(page, 500)
 
     while True:
         before_count = len(records)
@@ -1834,7 +1851,7 @@ def scan_collection_page(page: Page, max_cards: int, scroll_delay_ms: int) -> li
 
         previous_scroll_top = metrics["scrollTop"]
         metrics = scroll_collection(page)
-        page.wait_for_timeout(scroll_delay_ms)
+        ui_pause(page, scroll_delay_ms)
         if metrics["scrollTop"] == previous_scroll_top:
             stagnant_rounds += 1
 
@@ -2046,7 +2063,7 @@ def filter_collection(page: Page, query: str, delay_ms: int) -> None:
     if search is None:
         raise RuntimeError("Could not find the collection search input.")
     search.fill(query)
-    page.wait_for_timeout(delay_ms)
+    ui_pause(page, delay_ms)
 
 
 def clear_collection_filter(page: Page, delay_ms: int) -> None:
@@ -2055,7 +2072,7 @@ def clear_collection_filter(page: Page, delay_ms: int) -> None:
         return
     select_all_text(search)
     search.press("Backspace")
-    page.wait_for_timeout(delay_ms)
+    ui_pause(page, delay_ms)
 
 
 def click_select_mode(page: Page) -> None:
@@ -2069,7 +2086,7 @@ def click_select_mode(page: Page) -> None:
     if selector is None:
         raise RuntimeError("Could not find the collection Sélectionner button.")
     selector.click(timeout=5_000)
-    page.wait_for_timeout(500)
+    ui_pause(page, 500)
 
 
 def find_card_click_point_by_scrolling(
@@ -2081,7 +2098,7 @@ def find_card_click_point_by_scrolling(
     """Search the current page's scroll container for a card click point."""
 
     reset_collection_scroll(page)
-    page.wait_for_timeout(delay_ms)
+    ui_pause(page, delay_ms)
     stagnant_rounds = 0
 
     while True:
@@ -2095,7 +2112,7 @@ def find_card_click_point_by_scrolling(
 
         previous_scroll_top = metrics["scrollTop"]
         metrics = scroll_collection(page)
-        page.wait_for_timeout(delay_ms)
+        ui_pause(page, delay_ms)
         if metrics["scrollTop"] == previous_scroll_top:
             stagnant_rounds += 1
         else:
@@ -2190,7 +2207,7 @@ def select_card(page: Page, card: CardRecord, selection_delay_ms: int) -> None:
         raise RuntimeError(f"Could not find visible card to select{page_hint}: {card.title}")
 
     page.mouse.click(point["x"], point["y"])
-    page.wait_for_timeout(selection_delay_ms)
+    ui_pause(page, selection_delay_ms)
     if used_filter:
         clear_collection_filter(page, selection_delay_ms)
 
@@ -2294,7 +2311,7 @@ def click_bulk_tag_menu(page: Page) -> None:
     if not point:
         raise RuntimeError("Could not find a bulk étiquette action.\n" + dump_visible_controls(page))
     page.mouse.click(point["x"], point["y"])
-    page.wait_for_timeout(600)
+    ui_pause(page, 600)
 
 
 def click_tag_option_or_fill(page: Page, target_tag: str) -> None:
@@ -2311,7 +2328,7 @@ def click_tag_option_or_fill(page: Page, target_tag: str) -> None:
     )
     if option is not None:
         option.click(timeout=3_000)
-        page.wait_for_timeout(500)
+        ui_pause(page, 500)
         return
 
     tag_input = get_first_visible(
@@ -2326,9 +2343,9 @@ def click_tag_option_or_fill(page: Page, target_tag: str) -> None:
         raise RuntimeError(f"Could not find or enter target tag '{target_tag}'.\n" + dump_visible_controls(page))
 
     tag_input.fill(target_tag)
-    page.wait_for_timeout(300)
+    ui_pause(page, 300)
     tag_input.press("Enter")
-    page.wait_for_timeout(500)
+    ui_pause(page, 500)
 
     create_option = get_first_visible(
         [
@@ -2341,7 +2358,7 @@ def click_tag_option_or_fill(page: Page, target_tag: str) -> None:
     )
     if create_option is not None:
         create_option.click(timeout=3_000)
-        page.wait_for_timeout(700)
+        ui_pause(page, 700)
 
 
 def read_bulk_tag_result(page: Page) -> BulkTagResult | None:
@@ -2358,7 +2375,7 @@ def wait_for_bulk_tag_result(page: Page, timeout_ms: int = 5_000) -> BulkTagResu
         result = read_bulk_tag_result(page)
         if result is not None:
             return result
-        page.wait_for_timeout(150)
+        ui_pause(page, 150)
     return read_bulk_tag_result(page)
 
 
@@ -2379,7 +2396,7 @@ def click_confirmation_if_present(page: Page) -> None:
         try:
             if confirm.is_enabled(timeout=500):
                 confirm.click(timeout=3_000)
-                page.wait_for_timeout(700)
+                ui_pause(page, 700)
         except PlaywrightError:
             pass
 
@@ -2397,7 +2414,7 @@ def click_bulk_result_close(page: Page) -> None:
     if close_button is not None:
         try:
             close_button.click(timeout=3_000)
-            page.wait_for_timeout(700)
+            ui_pause(page, 700)
             return
         except PlaywrightError:
             pass
@@ -2451,12 +2468,12 @@ def click_bulk_result_close(page: Page) -> None:
     )
     if point:
         page.mouse.click(point["x"], point["y"])
-        page.wait_for_timeout(700)
+        ui_pause(page, 700)
         return
 
     try:
         page.keyboard.press("Escape")
-        page.wait_for_timeout(700)
+        ui_pause(page, 700)
     except PlaywrightError:
         pass
 
@@ -2490,7 +2507,7 @@ def card_has_tag_by_scrolling(page: Page, card: CardRecord, target_tag: str, del
     """Scan the current page's scroll container until the card/tag is found."""
 
     reset_collection_scroll(page)
-    page.wait_for_timeout(delay_ms)
+    ui_pause(page, delay_ms)
     stagnant_rounds = 0
 
     while True:
@@ -2503,7 +2520,7 @@ def card_has_tag_by_scrolling(page: Page, card: CardRecord, target_tag: str, del
 
         previous_scroll_top = metrics["scrollTop"]
         metrics = scroll_collection(page)
-        page.wait_for_timeout(delay_ms)
+        ui_pause(page, delay_ms)
         if metrics["scrollTop"] == previous_scroll_top:
             stagnant_rounds += 1
         else:
@@ -2520,7 +2537,7 @@ def verify_batch_tags(page: Page, batch: Sequence[CardRecord], target_tag: str, 
             if card_has_tag_by_scrolling(page, card, target_tag, delay_ms):
                 found = True
                 break
-            page.wait_for_timeout(delay_ms)
+            ui_pause(page, delay_ms)
         if not found:
             missing.append(card.title)
 
@@ -2579,9 +2596,9 @@ def apply_tag_batches(
                 raise
             selected_count += 1
 
-        page.wait_for_timeout(batch_delay_ms)
+        ui_pause(page, batch_delay_ms)
         bulk_result = add_tag_to_selected(page, target_tag)
-        page.wait_for_timeout(batch_delay_ms)
+        ui_pause(page, batch_delay_ms)
         if bulk_result is None or bulk_result.successful_count < len(batch):
             verify_batch_tags(page, batch, target_tag, selection_delay_ms)
         applied.extend(batch)
@@ -2725,6 +2742,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scroll-delay-ms", type=int, default=700, help="Delay after each collection scroll.")
     parser.add_argument("--selection-delay-ms", type=int, default=250, help="Delay between selection/search actions.")
     parser.add_argument("--batch-delay-ms", type=int, default=1_500, help="Delay before and after bulk tag application.")
+    parser.add_argument(
+        "--jitter-ms",
+        type=int,
+        default=DEFAULT_UI_JITTER_MS,
+        help="Maximum tiny random UI pause added after scripted actions. 0 disables jitter.",
+    )
     parser.add_argument("--wikipedia-delay-ms", type=int, default=500, help="Delay between Wikipedia API batches.")
     parser.add_argument("--wikipedia-batch-size", type=int, default=20, help="Wikipedia titles per API request.")
     parser.add_argument("--cache-path", type=Path, default=DEFAULT_CACHE_PATH, help="Wikipedia metadata cache path.")
@@ -2757,8 +2780,11 @@ def run(args: argparse.Namespace) -> int:
         raise RuntimeError("--batch-size must be at least 1.")
     if args.max_apply_candidates < 0:
         raise RuntimeError("--max-apply-candidates cannot be negative.")
+    if args.jitter_ms < 0:
+        raise RuntimeError("--jitter-ms cannot be negative.")
     if args.sample_per_tag < 0:
         raise RuntimeError("--sample-per-tag cannot be negative.")
+    set_ui_jitter_ms(args.jitter_ms)
 
     page: Page | None = None
     cards: list[CardRecord] = []

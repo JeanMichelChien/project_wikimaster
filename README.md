@@ -266,6 +266,7 @@ Collection tagger CLI options:
 - `--batch-size`: defaults to `8`.
 - `--max-apply-candidates`: defaults to `0`, meaning apply every candidate for each enabled tag. Use `1` for a single-card live smoke test.
 - `--scroll-delay-ms`, `--selection-delay-ms`, `--batch-delay-ms`, and `--wikipedia-delay-ms`: throttling controls.
+- `--jitter-ms`: defaults to `80`. Adds up to this many random milliseconds after UI actions. Use `0` to disable.
 - `--cache-path`: defaults to `artifacts/wikimasters_wikipedia_cache.json`. If that file is missing, the script reuses the legacy `artifacts/plant_wikipedia_cache.json` cache before writing the new cache path.
 - `--report-path`: defaults to `artifacts/tag_report.md`.
 - `--candidate-path`: defaults to `artifacts/tag_candidates.json`.
@@ -282,6 +283,7 @@ Seller CLI options:
 - `--start-price`: defaults to `10` for `C`/`PC` cards.
 - `--non-low-rarity-start-price`: defaults to `40` for manually tagged non-`C`/`PC` cards.
 - `--duration`: defaults to `10 min`.
+- `--jitter-ms`: defaults to `80`. Adds up to this many random milliseconds after UI actions. Use `0` to disable.
 
 ## Failure Artifacts
 

@@ -19,6 +19,7 @@ try:
     from scripts.tag_collection_cards import (
         COLLECTION_URL,
         DEFAULT_TIMEOUT_MS,
+        DEFAULT_UI_JITTER_MS,
         BICRAVE_LOW_RARITIES,
         CardRecord,
         PlaywrightError,
@@ -37,13 +38,16 @@ try:
         reset_collection_scroll,
         save_failure_artifacts,
         scan_collection,
+        set_ui_jitter_ms,
         settle_page,
         sync_playwright,
+        ui_pause,
     )
 except ModuleNotFoundError:
     from tag_collection_cards import (  # type: ignore[no-redef]
         COLLECTION_URL,
         DEFAULT_TIMEOUT_MS,
+        DEFAULT_UI_JITTER_MS,
         BICRAVE_LOW_RARITIES,
         CardRecord,
         PlaywrightError,
@@ -62,8 +66,10 @@ except ModuleNotFoundError:
         reset_collection_scroll,
         save_failure_artifacts,
         scan_collection,
+        set_ui_jitter_ms,
         settle_page,
         sync_playwright,
+        ui_pause,
     )
 
 try:
@@ -147,9 +153,9 @@ def click_control_with_words(page: Page, words: Sequence[str], timeout_ms: int =
         )
         if point:
             page.mouse.click(point["x"], point["y"])
-            page.wait_for_timeout(500)
+            ui_pause(page, 500)
             return True
-        page.wait_for_timeout(200)
+        ui_pause(page, 200)
     return False
 
 
@@ -167,7 +173,7 @@ def set_collection_tag_filter(page: Page, target_tag: str, delay_ms: int) -> boo
         return False
 
     dropdown.click(timeout=3_000)
-    page.wait_for_timeout(500)
+    ui_pause(page, 500)
     wanted = normalize_text(target_tag)
     point = page.evaluate(
         """
@@ -199,7 +205,7 @@ def set_collection_tag_filter(page: Page, target_tag: str, delay_ms: int) -> boo
         return False
 
     page.mouse.click(point["x"], point["y"])
-    page.wait_for_timeout(delay_ms)
+    ui_pause(page, delay_ms)
     return True
 
 
@@ -246,7 +252,7 @@ def open_collection_card(page: Page, card: CardRecord, target_tag: str, delay_ms
         page.wait_for_load_state("domcontentloaded", timeout=DEFAULT_TIMEOUT_MS)
     except PlaywrightTimeoutError:
         pass
-    page.wait_for_timeout(800)
+    ui_pause(page, 800)
 
 
 def fill_starting_bid(page: Page, start_price: int) -> bool:
@@ -344,7 +350,7 @@ def set_duration(page: Page, duration_label: str) -> bool:
     )
     if duration_control is not None:
         duration_control.click(timeout=3_000)
-        page.wait_for_timeout(400)
+        ui_pause(page, 400)
 
     return click_control_with_words(page, normalized_words(duration_label), timeout_ms=2_000)
 
@@ -362,13 +368,13 @@ def close_current_dialog_or_detail(page: Page) -> None:
     if close_button is not None:
         try:
             close_button.click(timeout=2_000)
-            page.wait_for_timeout(500)
+            ui_pause(page, 500)
             return
         except PlaywrightError:
             pass
     try:
         page.keyboard.press("Escape")
-        page.wait_for_timeout(500)
+        ui_pause(page, 500)
     except PlaywrightError:
         pass
 
@@ -397,7 +403,7 @@ def launch_auction(page: Page, card: CardRecord, start_price: int, duration_labe
     if not click_control_with_words(page, ("lancer", "enchere"), timeout_ms=3_000):
         raise RuntimeError(f"Could not find 'Lancer l'enchère' for {card.title}.\n" + dump_visible_controls(page))
 
-    page.wait_for_timeout(1_500)
+    ui_pause(page, 1_500)
     close_current_dialog_or_detail(page)
     log(f"Launched auction for '{card.title}'.")
     return True
@@ -443,6 +449,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--duration", default="10 min", help="Auction duration label to select.")
     parser.add_argument("--scroll-delay-ms", type=int, default=700, help="Delay after each collection scroll.")
     parser.add_argument("--selection-delay-ms", type=int, default=300, help="Delay between card/search UI actions.")
+    parser.add_argument(
+        "--jitter-ms",
+        type=int,
+        default=DEFAULT_UI_JITTER_MS,
+        help="Maximum tiny random UI pause added after scripted actions. 0 disables jitter.",
+    )
     return parser
 
 
@@ -461,6 +473,9 @@ def run(args: argparse.Namespace) -> int:
         raise RuntimeError("--start-price must be positive.")
     if args.non_low_rarity_start_price < 1:
         raise RuntimeError("--non-low-rarity-start-price must be positive.")
+    if args.jitter_ms < 0:
+        raise RuntimeError("--jitter-ms cannot be negative.")
+    set_ui_jitter_ms(args.jitter_ms)
 
     dry_run = not args.apply
     email = required_env("WIKIMASTERS_EMAIL")
