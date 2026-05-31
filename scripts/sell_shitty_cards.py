@@ -3,20 +3,26 @@
 
 The script filters the collection to the `à bicrave` etiquette, opens up to
 five matching cards per cycle, and uses the normal WikiMasters auction UI.
-It is dry-run by default; pass `--apply` to actually launch auctions.
+It is dry-run by default; pass `--apply` to actually launch auctions. Cards
+keep the etiquette after an unsold auction and are retried only after the
+visible tagged pool has had one attempt in the persisted retry pass.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Sequence
 
 try:
     from scripts.tag_collection_cards import (
+        ARTIFACT_DIR,
         COLLECTION_URL,
         DEFAULT_TIMEOUT_MS,
         DEFAULT_UI_JITTER_MS,
@@ -45,6 +51,7 @@ try:
     )
 except ModuleNotFoundError:
     from tag_collection_cards import (  # type: ignore[no-redef]
+        ARTIFACT_DIR,
         COLLECTION_URL,
         DEFAULT_TIMEOUT_MS,
         DEFAULT_UI_JITTER_MS,
@@ -84,6 +91,7 @@ DEFAULT_MAX_PER_CYCLE = 5
 DEFAULT_SCAN_LIMIT = 50
 DEFAULT_LOW_RARITY_START_PRICE = 10
 DEFAULT_NON_LOW_RARITY_START_PRICE = 40
+DEFAULT_SELL_STATE_PATH = ARTIFACT_DIR / "sell_auction_state.json"
 
 
 class CardUnavailableError(RuntimeError):
@@ -98,6 +106,83 @@ def starting_price_for_card(card: CardRecord, low_rarity_price: int, non_low_rar
     """Use 10 for normal C/PC resale cards and 40 for manually tagged rarities."""
 
     return low_rarity_price if card.rarity.upper() in BICRAVE_LOW_RARITIES else non_low_rarity_price
+
+
+def load_attempted_pass_keys(path: Path, target_tag: str) -> set[str]:
+    """Load the current auction retry pass so one-shot runs rotate fairly."""
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return set()
+    except (json.JSONDecodeError, OSError) as exc:
+        log(f"Could not read seller state {path}: {exc}")
+        return set()
+
+    tags = data.get("tags", {}) if isinstance(data, dict) else {}
+    tag_state = tags.get(target_tag, {}) if isinstance(tags, dict) else {}
+    keys = tag_state.get("attempted_pass_keys", []) if isinstance(tag_state, dict) else []
+    if not isinstance(keys, list):
+        return set()
+    return {str(key) for key in keys if str(key)}
+
+
+def save_attempted_pass_keys(path: Path, target_tag: str, attempted_pass_keys: set[str]) -> None:
+    """Persist the current retry pass without touching the cards or their tags."""
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        data = {}
+    except (json.JSONDecodeError, OSError):
+        data = {}
+
+    if not isinstance(data, dict):
+        data = {}
+    tags = data.setdefault("tags", {})
+    if not isinstance(tags, dict):
+        tags = {}
+        data["tags"] = tags
+
+    tags[target_tag] = {
+        "attempted_pass_keys": sorted(attempted_pass_keys),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def choose_next_auction_card(
+    candidates: Sequence[CardRecord],
+    attempted_pass_keys: set[str],
+    attempted_cycle_keys: set[str],
+    *,
+    restart_pass: bool = True,
+) -> tuple[CardRecord | None, bool]:
+    """Pick the next tagged card while giving every visible candidate one attempt per pass.
+
+    Unsold cards keep their `à bicrave` tag on WikiMasters, and they become
+    eligible again after every other visible tagged card has been attempted once
+    in the current persisted retry pass.
+    """
+
+    visible_keys = {card.key for card in candidates}
+    attempted_pass_keys.intersection_update(visible_keys)
+
+    available_cards = [card for card in candidates if card.key not in attempted_cycle_keys]
+    if not available_cards:
+        return None, False
+
+    unattempted_cards = [card for card in available_cards if card.key not in attempted_pass_keys]
+    if unattempted_cards:
+        return unattempted_cards[0], False
+
+    if not restart_pass:
+        return None, True
+
+    attempted_pass_keys.clear()
+    return available_cards[0], True
 
 
 def click_control_with_words(page: Page, words: Sequence[str], timeout_ms: int = 3_000) -> bool:
@@ -455,6 +540,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_UI_JITTER_MS,
         help="Maximum tiny random UI pause added after scripted actions. 0 disables jitter.",
     )
+    parser.add_argument(
+        "--state-path",
+        type=Path,
+        default=DEFAULT_SELL_STATE_PATH,
+        help="JSON file used to remember which tagged cards were already attempted in the current retry pass.",
+    )
     return parser
 
 
@@ -481,7 +572,12 @@ def run(args: argparse.Namespace) -> int:
     email = required_env("WIKIMASTERS_EMAIL")
     password = required_env("WIKIMASTERS_PASSWORD")
     headless = os.environ.get("HEADLESS", "1").lower() not in {"0", "false", "no"}
-    seen_keys: set[str] = set()
+    attempted_pass_keys = load_attempted_pass_keys(args.state_path, args.tag)
+    if attempted_pass_keys:
+        log(
+            f"Loaded {len(attempted_pass_keys)} previously attempted "
+            f"'{args.tag}' card(s) from {args.state_path}."
+        )
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=headless)
@@ -513,21 +609,27 @@ def run(args: argparse.Namespace) -> int:
                         args.scroll_delay_ms,
                         args.selection_delay_ms,
                     )
-                    next_cards = [
-                        card
-                        for card in candidates
-                        if card.key not in seen_keys and card.key not in attempted_this_cycle
-                    ]
-                    if not next_cards:
+                    previous_attempted_pass_keys = set(attempted_pass_keys)
+                    card, restarted_pass = choose_next_auction_card(
+                        candidates,
+                        attempted_pass_keys,
+                        attempted_this_cycle,
+                    )
+                    if restarted_pass:
+                        log(
+                            f"All visible '{args.tag}' card(s) have had one auction attempt in the current retry pass; "
+                            "starting a new retry pass."
+                        )
+                    if args.apply and attempted_pass_keys != previous_attempted_pass_keys:
+                        save_attempted_pass_keys(args.state_path, args.tag, attempted_pass_keys)
+                    if card is None:
                         if launched == 0:
-                            log(f"No new '{args.tag}' card(s) available to auction; stopping.")
+                            log(f"No visible '{args.tag}' card(s) available to auction; stopping.")
                             return 0
                         log(f"No more available '{args.tag}' card(s) in this cycle.")
                         break
 
-                    card = next_cards[0]
                     attempted_this_cycle.add(card.key)
-                    seen_keys.add(card.key)
                     start_price = starting_price_for_card(card, args.start_price, args.non_low_rarity_start_price)
                     log(f"Preparing auction for '{card.title}' ({card.rarity}) at start price {start_price}.")
                     try:
@@ -537,6 +639,9 @@ def run(args: argparse.Namespace) -> int:
                         continue
                     if launch_auction(page, card, start_price, args.duration, args.apply):
                         launched += 1
+                    attempted_pass_keys.add(card.key)
+                    if args.apply:
+                        save_attempted_pass_keys(args.state_path, args.tag, attempted_pass_keys)
 
                 action = "would launch" if dry_run else "launched"
                 log(f"Cycle {cycle} complete: {action} {launched}/{args.max_cards_per_cycle} auction(s).")

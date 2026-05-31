@@ -6,7 +6,12 @@ import unittest
 from pathlib import Path
 
 from scripts.env_loader import load_env_file
-from scripts.sell_shitty_cards import starting_price_for_card
+from scripts.sell_shitty_cards import (
+    choose_next_auction_card,
+    load_attempted_pass_keys,
+    save_attempted_pass_keys,
+    starting_price_for_card,
+)
 from scripts.tag_collection_cards import (
     CardRecord,
     TagClassification,
@@ -485,6 +490,50 @@ class TopicClassifierTests(unittest.TestCase):
         self.assertEqual(starting_price_for_card(make_card("Cheap Film", rarity="PC"), 10, 40), 10)
         self.assertEqual(starting_price_for_card(make_card("Manual Rare", rarity="R"), 10, 40), 40)
         self.assertEqual(starting_price_for_card(make_card("Manual Ultra Rare", rarity="UR"), 10, 40), 40)
+
+    def test_seller_prefers_cards_not_attempted_in_current_pass(self) -> None:
+        first = make_card("First", rarity="C")
+        second = make_card("Second", rarity="PC")
+        attempted_pass_keys = {first.key}
+
+        chosen, restarted = choose_next_auction_card([first, second], attempted_pass_keys, set())
+
+        self.assertEqual(chosen, second)
+        self.assertFalse(restarted)
+        self.assertEqual(attempted_pass_keys, {first.key})
+
+    def test_seller_restarts_retry_pass_after_all_visible_cards_were_attempted(self) -> None:
+        first = make_card("First", rarity="C")
+        second = make_card("Second", rarity="PC")
+        attempted_pass_keys = {first.key, second.key}
+
+        chosen, restarted = choose_next_auction_card([first, second], attempted_pass_keys, set())
+
+        self.assertEqual(chosen, first)
+        self.assertTrue(restarted)
+        self.assertEqual(attempted_pass_keys, set())
+
+    def test_seller_does_not_retry_same_card_in_one_cycle(self) -> None:
+        first = make_card("First", rarity="C")
+        second = make_card("Second", rarity="PC")
+        attempted_pass_keys = {first.key, second.key}
+
+        chosen, restarted = choose_next_auction_card([first, second], attempted_pass_keys, {first.key})
+
+        self.assertEqual(chosen, second)
+        self.assertTrue(restarted)
+        self.assertEqual(attempted_pass_keys, set())
+
+    def test_seller_retry_pass_state_roundtrip_is_per_tag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "sell_state.json"
+
+            save_attempted_pass_keys(path, "à bicrave", {"first", "second"})
+            save_attempted_pass_keys(path, "other", {"third"})
+
+            self.assertEqual(load_attempted_pass_keys(path, "à bicrave"), {"first", "second"})
+            self.assertEqual(load_attempted_pass_keys(path, "other"), {"third"})
+            self.assertEqual(load_attempted_pass_keys(path, "missing"), set())
 
     def test_a_bicrave_uses_metadata_when_visible_text_is_sparse(self) -> None:
         card = make_card("Tiny Town", "", rarity="C")

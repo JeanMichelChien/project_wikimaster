@@ -114,6 +114,13 @@ python3 scripts/tag_collection_cards.py --apply --tags plante --batch-size 1
 
 The `à bicrave` tag is used to tag and sell shitty cards.
 
+Full local flow: scan the collection, apply strict `à bicrave` candidates, then launch  auction on all shitty cards:
+
+```bash
+python3 scripts/tag_collection_cards.py --apply --tags "à bicrave" --batch-size 1 && \
+python3 scripts/sell_shitty_cards.py --apply
+```
+
 Seller dry run:
 
 ```bash
@@ -131,6 +138,10 @@ Run repeated batches. The script launches up to 5 auctions, waits 10 minutes and
 ```bash
 python3 scripts/sell_shitty_cards.py --apply
 ```
+
+Unsold cards keep their `à bicrave` tag. The seller records a retry pass in `artifacts/sell_auction_state.json`:
+every visible tagged card gets one auction attempt before previously attempted unsold cards are eligible again,
+even across separate script runs.
 
 Do not run mutating tag and seller commands in parallel. Dry runs are fine, but `--apply` tag runs can change the same filtered collection that the seller is reading.
 
@@ -167,6 +178,8 @@ The tagger writes:
 - `artifacts/wikimasters_wikipedia_cache.json`: cached Wikipedia metadata.
 
 Failure screenshots and metadata are also written under `artifacts/`.
+
+The seller also writes `artifacts/sell_auction_state.json` to remember the current `à bicrave` retry pass.
 
 ## Configuration
 
@@ -208,12 +221,13 @@ Seller options:
 - `--tag`: defaults to `à bicrave`.
 - `--max-cards-per-cycle`: defaults to `5`, and cannot exceed `5`.
 - `--scan-limit`: defaults to `50` tagged cards scanned per cycle.
-- `--cycles`: defaults to `0`, meaning repeat until no new tagged cards remain.
+- `--cycles`: defaults to `0`, meaning repeat until no visible tagged cards are available.
 - `--wait-seconds`: defaults to `610`.
 - `--start-price`: defaults to `10` for `C`/`PC` cards.
 - `--non-low-rarity-start-price`: defaults to `40` for manually tagged non-`C`/`PC` cards.
 - `--duration`: defaults to `10 min`.
 - `--jitter-ms`: defaults to `80`; use `0` to disable.
+- `--state-path`: defaults to `artifacts/sell_auction_state.json`.
 
 ## GitHub Actions And cron-job.org
 
