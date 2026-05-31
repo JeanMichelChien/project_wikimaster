@@ -80,6 +80,10 @@ DEFAULT_LOW_RARITY_START_PRICE = 10
 DEFAULT_NON_LOW_RARITY_START_PRICE = 40
 
 
+class CardUnavailableError(RuntimeError):
+    """Raised when a pre-scanned card is no longer visible in the filtered collection."""
+
+
 def normalized_words(value: str) -> list[str]:
     return [word for word in normalize_text(value).split(" ") if word]
 
@@ -235,7 +239,7 @@ def open_collection_card(page: Page, card: CardRecord, target_tag: str, delay_ms
         filter_collection(page, card.title, delay_ms)
         point = find_card_click_point_by_scrolling(page, card, delay_ms)
     if point is None:
-        raise RuntimeError(f"Could not find card to sell: {card.title}")
+        raise CardUnavailableError(f"Could not find card to sell: {card.title}")
 
     page.mouse.click(point["x"], point["y"])
     try:
@@ -483,29 +487,44 @@ def run(args: argparse.Namespace) -> int:
             while args.cycles == 0 or cycle < args.cycles:
                 cycle += 1
                 log(f"Starting auction cycle {cycle}{' (dry run)' if dry_run else ''}.")
-                candidates = collect_tagged_cards(
-                    page,
-                    args.tag,
-                    args.scan_limit,
-                    args.scroll_delay_ms,
-                    args.selection_delay_ms,
-                )
-                cycle_cards = [card for card in candidates if card.key not in seen_keys][: args.max_cards_per_cycle]
-                if not cycle_cards:
-                    log(f"No new '{args.tag}' card(s) available to auction; stopping.")
-                    return 0
-
                 launched = 0
-                for card in cycle_cards:
+                attempted_this_cycle: set[str] = set()
+
+                while launched < args.max_cards_per_cycle:
+                    candidates = collect_tagged_cards(
+                        page,
+                        args.tag,
+                        args.scan_limit,
+                        args.scroll_delay_ms,
+                        args.selection_delay_ms,
+                    )
+                    next_cards = [
+                        card
+                        for card in candidates
+                        if card.key not in seen_keys and card.key not in attempted_this_cycle
+                    ]
+                    if not next_cards:
+                        if launched == 0:
+                            log(f"No new '{args.tag}' card(s) available to auction; stopping.")
+                            return 0
+                        log(f"No more available '{args.tag}' card(s) in this cycle.")
+                        break
+
+                    card = next_cards[0]
+                    attempted_this_cycle.add(card.key)
                     seen_keys.add(card.key)
                     start_price = starting_price_for_card(card, args.start_price, args.non_low_rarity_start_price)
                     log(f"Preparing auction for '{card.title}' ({card.rarity}) at start price {start_price}.")
-                    open_collection_card(page, card, args.tag, args.selection_delay_ms)
+                    try:
+                        open_collection_card(page, card, args.tag, args.selection_delay_ms)
+                    except CardUnavailableError as exc:
+                        log(f"Skipping unavailable card: {exc}")
+                        continue
                     if launch_auction(page, card, start_price, args.duration, args.apply):
                         launched += 1
 
                 action = "would launch" if dry_run else "launched"
-                log(f"Cycle {cycle} complete: {action} {launched}/{len(cycle_cards)} auction(s).")
+                log(f"Cycle {cycle} complete: {action} {launched}/{args.max_cards_per_cycle} auction(s).")
                 if dry_run:
                     return 0
                 if args.cycles and cycle >= args.cycles:
