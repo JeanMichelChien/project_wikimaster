@@ -213,6 +213,12 @@ def cards_matching_seller_filter(
     return [card for card in matching_cards if is_sellable_auction_card(card)]
 
 
+def protected_tagged_cards(scanned: Sequence[CardRecord], target_tag: str) -> list[CardRecord]:
+    """Return protected cards only when they visibly carry the target seller tag."""
+
+    return [card for card in scanned if has_target_tag(card, target_tag) and not is_sellable_auction_card(card)]
+
+
 def detail_text_has_tag(detail_text: str, target_tag: str) -> bool:
     """Return whether an open card detail contains the exact target tag text."""
 
@@ -503,10 +509,10 @@ def collect_tagged_cards(page: Page, target_tag: str, scan_limit: int, scroll_de
 
     scanned = scan_seller_filtered_collection(page, scan_limit, scroll_delay_ms)
     cards = cards_matching_seller_filter(scanned, target_tag, tag_filter_applied)
-    protected_cards = [card for card in scanned if not is_sellable_auction_card(card)]
+    protected_cards = protected_tagged_cards(scanned, target_tag)
     if protected_cards:
         log(
-            "Skipping protected rarity card(s), even though they are filtered/tagged: "
+            f"Skipping protected rarity card(s) that visibly carry '{target_tag}': "
             + ", ".join(f"{card.title} ({card.rarity})" for card in protected_cards[:20])
             + (f", and {len(protected_cards) - 20} more" if len(protected_cards) > 20 else "")
         )

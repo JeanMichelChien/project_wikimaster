@@ -12,6 +12,7 @@ from scripts.sell_shitty_cards import (
     detail_text_has_tag,
     is_sellable_auction_card,
     load_attempted_pass_keys,
+    protected_tagged_cards,
     save_attempted_pass_keys,
     starting_price_for_card,
 )
@@ -639,6 +640,12 @@ class TopicClassifierTests(unittest.TestCase):
             cards_matching_seller_filter([legendary, rare], "à bicrave", tag_filter_applied=True),
             [rare],
         )
+
+    def test_seller_only_reports_protected_cards_when_they_have_target_tag(self) -> None:
+        untagged_legendary = make_card("Anna's Archive", rarity="L")
+        tagged_legendary = make_card("Protected Tagged", tags=("à bicrave",), rarity="L")
+
+        self.assertEqual(protected_tagged_cards([untagged_legendary, tagged_legendary], "à bicrave"), [tagged_legendary])
 
     def test_seller_requires_visible_tag_even_when_filter_claims_success(self) -> None:
         missing_chip = make_card("Filtered Card", "commune francaise", rarity="C")
