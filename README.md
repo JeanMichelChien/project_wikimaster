@@ -126,7 +126,7 @@ python3 scripts/tag_collection_cards.py --remove-invalid-existing --tags plante 
 
 The `à bicrave` tag is used to tag and sell shitty cards.
 
-Full local flow: scan the collection, apply strict `à bicrave` candidates, then launch  auction on all shitty cards:
+Full local flow: scan the collection, apply strict `à bicrave` candidates, then launch auctions on all shitty cards:
 
 ```bash
 python3 scripts/tag_collection_cards.py --apply --tags "à bicrave" --batch-size 1 && \
@@ -150,6 +150,9 @@ Run repeated batches. The script launches up to 5 auctions, waits 10 minutes and
 ```bash
 python3 scripts/sell_shitty_cards.py --apply
 ```
+
+By default the seller scans all cards returned by the `à bicrave` filter each cycle. Use `--scan-limit N` only when you intentionally want to inspect the first `N` filtered cards.
+Before launching an auction, the seller opens the card detail and verifies that the card itself shows the `à bicrave` tag.
 
 Unsold cards keep their `à bicrave` tag. The seller records a retry pass in `artifacts/sell_auction_state.json`:
 every visible tagged card gets one auction attempt before previously attempted unsold cards are eligible again,
@@ -179,7 +182,8 @@ There is also an apply-time guard: if a saved candidate file contains any non-`C
 The seller has a separate rule for manually tagged cards:
 
 - `C` and `PC` `à bicrave` cards start at `10`;
-- manually tagged non-`C`/`PC` `à bicrave` cards still sell, but start at `40`.
+- manually tagged `R`, `SR`, and `UR` `à bicrave` cards still sell, but start at `40`;
+- `L` cards are never auctioned by the seller, even if they carry `à bicrave`.
 
 ## Generated Files
 
@@ -234,11 +238,11 @@ Seller options:
 - `--apply`: launch auctions through the WikiMasters UI.
 - `--tag`: defaults to `à bicrave`.
 - `--max-cards-per-cycle`: defaults to `5`, and cannot exceed `5`.
-- `--scan-limit`: defaults to `50` tagged cards scanned per cycle.
+- `--scan-limit`: defaults to `0`, meaning all tagged cards scanned per cycle.
 - `--cycles`: defaults to `0`, meaning repeat until no visible tagged cards are available.
 - `--wait-seconds`: defaults to `610`.
 - `--start-price`: defaults to `10` for `C`/`PC` cards.
-- `--non-low-rarity-start-price`: defaults to `40` for manually tagged non-`C`/`PC` cards.
+- `--non-low-rarity-start-price`: defaults to `40` for manually tagged `R`, `SR`, and `UR` cards.
 - `--duration`: defaults to `10 min`.
 - `--jitter-ms`: defaults to `80`; use `0` to disable.
 - `--state-path`: defaults to `artifacts/sell_auction_state.json`.

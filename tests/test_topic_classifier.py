@@ -7,7 +7,10 @@ from pathlib import Path
 
 from scripts.env_loader import load_env_file
 from scripts.sell_shitty_cards import (
+    cards_matching_seller_filter,
     choose_next_auction_card,
+    detail_text_has_tag,
+    is_sellable_auction_card,
     load_attempted_pass_keys,
     save_attempted_pass_keys,
     starting_price_for_card,
@@ -16,16 +19,22 @@ from scripts.tag_collection_cards import (
     CardRecord,
     TagClassification,
     WikipediaMetadata,
+    apply_confirmed_tags,
     build_invalid_existing_by_tag,
     classify_card_for_tag,
     classify_plant_card,
+    forget_confirmed_tags,
     has_tag,
     iter_page_batches,
     load_candidate_artifact,
+    load_confirmed_tag_keys,
     nearby_page_numbers,
     parse_bulk_tag_result_text,
     parse_card_lines,
+    parse_selected_count_text,
     parse_tags_arg,
+    record_confirmed_tags,
+    search_queries_for_card,
     validate_apply_candidates_for_tag,
     write_candidate_artifact,
 )
@@ -294,6 +303,17 @@ class TopicClassifierTests(unittest.TestCase):
 
         self.assertEqual([(page, [card.title for card in batch]) for page, batch in batches], [(1, ["A"]), (1, ["C"]), (2, ["B"]), (2, ["D"])])
 
+    def test_iter_page_batches_can_process_later_pages_first(self) -> None:
+        cards = [
+            CardRecord(**{**make_card("A").__dict__, "page_number": 1}),
+            CardRecord(**{**make_card("B").__dict__, "page_number": 3}),
+            CardRecord(**{**make_card("C").__dict__, "page_number": 2}),
+        ]
+
+        batches = list(iter_page_batches(cards, batch_size=8, descending=True))
+
+        self.assertEqual([(page, [card.title for card in batch]) for page, batch in batches], [(3, ["B"]), (2, ["C"]), (1, ["A"])])
+
     def test_nearby_page_numbers_prefers_recorded_then_neighbors(self) -> None:
         self.assertEqual(nearby_page_numbers(16, 42, radius=2), (16, 15, 17, 14, 18))
 
@@ -331,6 +351,19 @@ class TopicClassifierTests(unittest.TestCase):
     def test_parse_bulk_tag_result_unrelated_text_is_ambiguous(self) -> None:
         self.assertIsNone(parse_bulk_tag_result_text("Appliquer une étiquette"))
 
+    def test_parse_selected_count_text(self) -> None:
+        self.assertEqual(parse_selected_count_text("0 carte sélectionnée"), 0)
+        self.assertEqual(parse_selected_count_text("2 cartes sélectionnées"), 2)
+        self.assertIsNone(parse_selected_count_text("Étiqueter"))
+
+    def test_search_queries_for_card_tries_short_normalized_title_variants(self) -> None:
+        queries = search_queries_for_card(make_card("Nick Carter, le roi des détectives"))
+
+        self.assertIn("Nick Carter, le roi des détectives", queries)
+        self.assertIn("Nick Carter", queries)
+        self.assertIn("nick carter le roi des detectives", queries)
+        self.assertIn("nick carter le roi", queries)
+
     def test_candidate_artifact_roundtrip_keeps_only_missing_matches(self) -> None:
         candidate = CardRecord(**{**make_card("Ancolie", "genre de plantes").__dict__, "page_number": 1, "page_total": 42})
         already_tagged = CardRecord(**{**make_card("Jacobaea", "genre de plantes", tags=("plante",)).__dict__, "page_number": 2})
@@ -367,6 +400,31 @@ class TopicClassifierTests(unittest.TestCase):
 
         self.assertEqual(loaded.tags, ("philo",))
         self.assertEqual([card.title for card in loaded.cards_by_tag["philo"]], ["Socrate"])
+
+    def test_confirmed_tag_cache_marks_scanned_cards_as_already_tagged(self) -> None:
+        plant = make_card("Ancolie", "genre de plantes")
+        philosopher = make_card("Socrate", "philosophe grec")
+
+        updated, added_count = apply_confirmed_tags(
+            [plant, philosopher],
+            {"plante": {plant.key}, "philo": {"missing-key"}},
+            ("plante", "philo"),
+        )
+
+        self.assertEqual(added_count, 1)
+        self.assertTrue(has_tag(updated[0], "plante"))
+        self.assertFalse(has_tag(updated[1], "philo"))
+
+    def test_confirmed_tag_cache_roundtrip_and_forget(self) -> None:
+        plant = make_card("Ancolie", "genre de plantes")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "confirmed_tags.json"
+            record_confirmed_tags("plante", [plant], path)
+            self.assertEqual(load_confirmed_tag_keys(path), {"plante": {plant.key}})
+
+            forget_confirmed_tags("plante", [plant], path)
+            self.assertEqual(load_confirmed_tag_keys(path), {})
 
     def test_philo_matches_philosopher_and_concept(self) -> None:
         philosopher = make_card("Socrate", "philosophe grec")
@@ -568,6 +626,36 @@ class TopicClassifierTests(unittest.TestCase):
         self.assertEqual(starting_price_for_card(make_card("Cheap Film", rarity="PC"), 10, 40), 10)
         self.assertEqual(starting_price_for_card(make_card("Manual Rare", rarity="R"), 10, 40), 40)
         self.assertEqual(starting_price_for_card(make_card("Manual Ultra Rare", rarity="UR"), 10, 40), 40)
+
+    def test_seller_never_sells_l_rarity_cards_even_when_tagged(self) -> None:
+        legendary = make_card("Anna's Archive", tags=("à bicrave",), rarity="L")
+        rare = make_card("Manual Rare", tags=("à bicrave",), rarity="R")
+
+        self.assertFalse(is_sellable_auction_card(legendary))
+        self.assertTrue(is_sellable_auction_card(rare))
+        with self.assertRaisesRegex(RuntimeError, "protected rarity L"):
+            starting_price_for_card(legendary, 10, 40)
+        self.assertEqual(
+            cards_matching_seller_filter([legendary, rare], "à bicrave", tag_filter_applied=True),
+            [rare],
+        )
+
+    def test_seller_requires_visible_tag_even_when_filter_claims_success(self) -> None:
+        missing_chip = make_card("Filtered Card", "commune francaise", rarity="C")
+        tagged = make_card("Tagged Card", "film sorti en 1999", tags=("à bicrave",), rarity="PC")
+
+        self.assertEqual(
+            cards_matching_seller_filter([missing_chip, tagged], "à bicrave", tag_filter_applied=True),
+            [tagged],
+        )
+        self.assertEqual(
+            cards_matching_seller_filter([missing_chip, tagged], "à bicrave", tag_filter_applied=False),
+            [tagged],
+        )
+
+    def test_seller_detail_text_must_contain_exact_target_tag(self) -> None:
+        self.assertTrue(detail_text_has_tag("Etiquettes\nà bicrave\nMettre aux enchères", "à bicrave"))
+        self.assertFalse(detail_text_has_tag("Khabib Nurmagomedov\nUR\nMettre aux enchères", "à bicrave"))
 
     def test_seller_prefers_cards_not_attempted_in_current_pass(self) -> None:
         first = make_card("First", rarity="C")

@@ -16,6 +16,7 @@ import os
 import re
 import sys
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
@@ -31,6 +32,7 @@ try:
         PlaywrightError,
         PlaywrightTimeoutError,
         block_heavy_resources,
+        click_next_collection_page,
         dump_visible_controls,
         filter_collection,
         find_card_click_point_by_scrolling,
@@ -40,10 +42,12 @@ try:
         login_if_needed,
         log,
         normalize_text,
+        read_collection_page_counter,
+        read_card_detail_text,
         required_env,
         reset_collection_scroll,
         save_failure_artifacts,
-        scan_collection,
+        scan_collection_page,
         set_ui_jitter_ms,
         settle_page,
         sync_playwright,
@@ -60,6 +64,7 @@ except ModuleNotFoundError:
         PlaywrightError,
         PlaywrightTimeoutError,
         block_heavy_resources,
+        click_next_collection_page,
         dump_visible_controls,
         filter_collection,
         find_card_click_point_by_scrolling,
@@ -69,10 +74,12 @@ except ModuleNotFoundError:
         login_if_needed,
         log,
         normalize_text,
+        read_collection_page_counter,
+        read_card_detail_text,
         required_env,
         reset_collection_scroll,
         save_failure_artifacts,
-        scan_collection,
+        scan_collection_page,
         set_ui_jitter_ms,
         settle_page,
         sync_playwright,
@@ -88,10 +95,11 @@ except ImportError:  # Allows py_compile in environments without Playwright.
 DEFAULT_TAG = "à bicrave"
 DEFAULT_WAIT_SECONDS = 10 * 60 + 10
 DEFAULT_MAX_PER_CYCLE = 5
-DEFAULT_SCAN_LIMIT = 50
+DEFAULT_SCAN_LIMIT = 0
 DEFAULT_LOW_RARITY_START_PRICE = 10
 DEFAULT_NON_LOW_RARITY_START_PRICE = 40
 DEFAULT_SELL_STATE_PATH = ARTIFACT_DIR / "sell_auction_state.json"
+NEVER_SELL_RARITIES = {"L"}
 
 
 class CardUnavailableError(RuntimeError):
@@ -102,9 +110,17 @@ def normalized_words(value: str) -> list[str]:
     return [word for word in normalize_text(value).split(" ") if word]
 
 
+def is_sellable_auction_card(card: CardRecord) -> bool:
+    """Keep protected rarities out of seller automation even when tagged."""
+
+    return card.rarity.upper() not in NEVER_SELL_RARITIES
+
+
 def starting_price_for_card(card: CardRecord, low_rarity_price: int, non_low_rarity_price: int) -> int:
     """Use 10 for normal C/PC resale cards and 40 for manually tagged rarities."""
 
+    if not is_sellable_auction_card(card):
+        raise RuntimeError(f"Refusing to auction protected rarity {card.rarity}: {card.title}")
     return low_rarity_price if card.rarity.upper() in BICRAVE_LOW_RARITIES else non_low_rarity_price
 
 
@@ -185,6 +201,36 @@ def choose_next_auction_card(
     return available_cards[0], True
 
 
+def cards_matching_seller_filter(
+    scanned: Sequence[CardRecord],
+    target_tag: str,
+    tag_filter_applied: bool,
+) -> list[CardRecord]:
+    """Return sellable cards with visible evidence of the target tag."""
+
+    _ = tag_filter_applied
+    matching_cards = [card for card in scanned if has_target_tag(card, target_tag)]
+    return [card for card in matching_cards if is_sellable_auction_card(card)]
+
+
+def detail_text_has_tag(detail_text: str, target_tag: str) -> bool:
+    """Return whether an open card detail contains the exact target tag text."""
+
+    normalized_detail = normalize_text(detail_text)
+    normalized_target = normalize_text(target_tag)
+    return bool(re.search(rf"(?<![a-z0-9]){re.escape(normalized_target)}(?![a-z0-9])", normalized_detail))
+
+
+def open_card_detail_has_tag(page: Page, target_tag: str) -> bool:
+    """Verify the selected card itself has the tag before opening the auction form."""
+
+    for _ in range(3):
+        if detail_text_has_tag(read_card_detail_text(page), target_tag):
+            return True
+        ui_pause(page, 500)
+    return False
+
+
 def click_control_with_words(page: Page, words: Sequence[str], timeout_ms: int = 3_000) -> bool:
     """Click the best visible button/link whose normalized text contains all words."""
 
@@ -244,6 +290,45 @@ def click_control_with_words(page: Page, words: Sequence[str], timeout_ms: int =
     return False
 
 
+def collection_tag_filter_looks_active(page: Page, target_tag: str) -> bool:
+    """Check the top collection controls for the selected etiquette label."""
+
+    wanted = normalize_text(target_tag)
+    try:
+        return bool(
+            page.evaluate(
+                """
+                (wanted) => {
+                  const normalize = (value) =>
+                    (value || '')
+                      .normalize('NFD')
+                      .replace(/[\\u0300-\\u036f]/g, '')
+                      .toLowerCase()
+                      .replace(/[^a-z0-9'/ -]+/g, ' ')
+                      .replace(/\\s+/g, ' ')
+                      .trim();
+                  for (const element of document.querySelectorAll('button, [role="button"], [aria-haspopup]')) {
+                    const rect = element.getBoundingClientRect();
+                    const style = window.getComputedStyle(element);
+                    if (style.visibility === 'hidden' || style.display === 'none') continue;
+                    if (rect.top < 120 || rect.top > 360 || rect.width < 80 || rect.height < 24) continue;
+                    const text = normalize([
+                      element.innerText,
+                      element.getAttribute('aria-label'),
+                      element.getAttribute('title'),
+                    ].filter(Boolean).join(' '));
+                    if (text.includes(wanted)) return true;
+                  }
+                  return false;
+                }
+                """,
+                wanted,
+            )
+        )
+    except PlaywrightError:
+        return False
+
+
 def set_collection_tag_filter(page: Page, target_tag: str, delay_ms: int) -> bool:
     """Use the collection etiquette dropdown so selling does not scan every card."""
 
@@ -254,10 +339,46 @@ def set_collection_tag_filter(page: Page, target_tag: str, delay_ms: int) -> boo
         ],
         timeout_ms=2_500,
     )
-    if dropdown is None:
-        return False
-
-    dropdown.click(timeout=3_000)
+    if dropdown is not None:
+        dropdown.click(timeout=3_000)
+    else:
+        point = page.evaluate(
+            """
+            () => {
+              const normalize = (value) =>
+                (value || '')
+                  .normalize('NFD')
+                  .replace(/[\\u0300-\\u036f]/g, '')
+                  .toLowerCase()
+                  .replace(/[^a-z0-9'/ -]+/g, ' ')
+                  .replace(/\\s+/g, ' ')
+                  .trim();
+              const candidates = [];
+              for (const element of document.querySelectorAll('button, [role="button"], div')) {
+                const rect = element.getBoundingClientRect();
+                const style = window.getComputedStyle(element);
+                if (style.visibility === 'hidden' || style.display === 'none' || rect.width < 80 || rect.height < 24) continue;
+                const text = normalize([
+                  element.innerText,
+                  element.getAttribute('aria-label'),
+                  element.getAttribute('title'),
+                ].filter(Boolean).join(' '));
+                if (!/etiquettes/.test(text)) continue;
+                if (/selectionner|etiqueter/.test(text)) continue;
+                candidates.push({
+                  x: rect.left + rect.width / 2,
+                  y: rect.top + rect.height / 2,
+                  score: (/toutes les etiquettes/.test(text) ? 1000 : 0) - rect.top,
+                });
+              }
+              candidates.sort((a, b) => b.score - a.score);
+              return candidates[0] || null;
+            }
+            """
+        )
+        if not point:
+            return False
+        page.mouse.click(point["x"], point["y"])
     ui_pause(page, 500)
     wanted = normalize_text(target_tag)
     point = page.evaluate(
@@ -272,15 +393,24 @@ def set_collection_tag_filter(page: Page, target_tag: str, delay_ms: int) -> boo
               .replace(/\\s+/g, ' ')
               .trim();
           const candidates = [];
-          for (const element of document.querySelectorAll('button, [role="button"], [role="option"], [role="menuitem"], div')) {
+          for (const element of document.querySelectorAll('button, [role="button"], [role="option"], [role="menuitem"]')) {
             const rect = element.getBoundingClientRect();
             const style = window.getComputedStyle(element);
             if (style.visibility === 'hidden' || style.display === 'none' || rect.width < 20 || rect.height < 20) continue;
+            if (rect.top < 120 || rect.top > 430) continue;
             const text = normalize(element.innerText || element.getAttribute('aria-label') || '');
             if (!text.includes(wanted)) continue;
-            candidates.push({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, area: rect.width * rect.height });
+            const role = element.getAttribute('role') || '';
+            candidates.push({
+              x: rect.left + rect.width / 2,
+              y: rect.top + rect.height / 2,
+              score:
+                (/option|menuitem/.test(role) ? 1000 : 0) +
+                (rect.width >= 80 && rect.width <= 320 ? 200 : 0) -
+                rect.top,
+            });
           }
-          candidates.sort((a, b) => a.area - b.area);
+          candidates.sort((a, b) => b.score - a.score);
           return candidates[0] || null;
         }
         """,
@@ -291,7 +421,71 @@ def set_collection_tag_filter(page: Page, target_tag: str, delay_ms: int) -> boo
 
     page.mouse.click(point["x"], point["y"])
     ui_pause(page, delay_ms)
-    return True
+    return collection_tag_filter_looks_active(page, target_tag)
+
+
+def scan_seller_filtered_collection(
+    page: Page,
+    max_cards: int,
+    scroll_delay_ms: int,
+    empty_page_limit: int = 3,
+    no_new_page_limit: int = 5,
+) -> list[CardRecord]:
+    """Scan a filtered collection and stop after repeated empty filtered pages."""
+
+    records: dict[str, CardRecord] = {}
+    empty_pages = 0
+    no_new_pages = 0
+    inferred_page_number = 1
+
+    while True:
+        counter = read_collection_page_counter(page)
+        page_number = counter[0] if counter else inferred_page_number
+        page_total = counter[1] if counter else None
+        page_label = f"{page_number}/{page_total}" if page_total else str(page_number)
+        log(f"Scanning filtered collection page {page_label}.")
+
+        remaining = max_cards - len(records) if max_cards > 0 else 0
+        if max_cards > 0 and remaining <= 0:
+            log(f"Reached --scan-limit={max_cards}; stopping scan.")
+            break
+
+        page_cards = [
+            replace(card, page_number=page_number, page_total=page_total)
+            for card in scan_collection_page(page, remaining, scroll_delay_ms)
+        ]
+        before_count = len(records)
+        for card in page_cards:
+            records.setdefault(card.key, card)
+        new_count = len(records) - before_count
+        log(
+            f"Scanned filtered page {page_label}: {len(page_cards)} card(s), "
+            f"{new_count} new, {len(records)} total."
+        )
+
+        if max_cards > 0 and len(records) >= max_cards:
+            log(f"Reached --scan-limit={max_cards}; stopping scan.")
+            break
+
+        empty_pages = empty_pages + 1 if not page_cards else 0
+        no_new_pages = no_new_pages + 1 if page_cards and new_count == 0 else 0
+        if empty_pages >= empty_page_limit:
+            log(f"Reached {empty_pages} consecutive empty filtered page(s); stopping scan.")
+            break
+        if no_new_pages >= no_new_page_limit:
+            log(f"Reached {no_new_pages} consecutive filtered page(s) with no new cards; stopping scan.")
+            break
+
+        if page_total is not None and page_number >= page_total:
+            log(f"Reached final filtered collection page {page_number}/{page_total}.")
+            break
+
+        if not click_next_collection_page(page):
+            log("No next filtered collection page is available.")
+            break
+        inferred_page_number = page_number + 1
+
+    return list(records.values())
 
 
 def collect_tagged_cards(page: Page, target_tag: str, scan_limit: int, scroll_delay_ms: int, delay_ms: int) -> list[CardRecord]:
@@ -300,14 +494,22 @@ def collect_tagged_cards(page: Page, target_tag: str, scan_limit: int, scroll_de
     page.goto(COLLECTION_URL, wait_until="domcontentloaded")
     settle_page(page)
     reset_collection_scroll(page)
-    if set_collection_tag_filter(page, target_tag, delay_ms):
+    tag_filter_applied = set_collection_tag_filter(page, target_tag, delay_ms)
+    if tag_filter_applied:
         log(f"Filtered collection by etiquette '{target_tag}'.")
     else:
         log(f"Could not use etiquette dropdown for '{target_tag}'; falling back to search.")
         filter_collection(page, target_tag, delay_ms)
 
-    scanned = scan_collection(page, scan_limit, scroll_delay_ms)
-    cards = [card for card in scanned if has_target_tag(card, target_tag)]
+    scanned = scan_seller_filtered_collection(page, scan_limit, scroll_delay_ms)
+    cards = cards_matching_seller_filter(scanned, target_tag, tag_filter_applied)
+    protected_cards = [card for card in scanned if not is_sellable_auction_card(card)]
+    if protected_cards:
+        log(
+            "Skipping protected rarity card(s), even though they are filtered/tagged: "
+            + ", ".join(f"{card.title} ({card.rarity})" for card in protected_cards[:20])
+            + (f", and {len(protected_cards) - 20} more" if len(protected_cards) > 20 else "")
+        )
     higher_rarity = [card for card in cards if card.rarity.upper() not in BICRAVE_LOW_RARITIES]
     if higher_rarity:
         log(
@@ -516,7 +718,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     mode.add_argument("--apply", action="store_true", help="Actually launch WikiMasters auctions.")
     parser.add_argument("--tag", default=DEFAULT_TAG, help="Etiquette used to find cards to sell.")
     parser.add_argument("--max-cards-per-cycle", type=int, default=DEFAULT_MAX_PER_CYCLE, help="Maximum auctions launched per cycle.")
-    parser.add_argument("--scan-limit", type=int, default=DEFAULT_SCAN_LIMIT, help="Maximum tagged cards scanned per cycle.")
+    parser.add_argument("--scan-limit", type=int, default=DEFAULT_SCAN_LIMIT, help="Maximum tagged cards scanned per cycle. 0 means all.")
     parser.add_argument("--cycles", type=int, default=0, help="Number of cycles to run. 0 means repeat until no new tagged cards remain.")
     parser.add_argument("--wait-seconds", type=int, default=DEFAULT_WAIT_SECONDS, help="Delay between cycles; defaults to 10 min 10 sec.")
     parser.add_argument(
@@ -554,8 +756,10 @@ def run(args: argparse.Namespace) -> int:
         raise RuntimeError("Playwright is not installed. Run `python -m pip install -r requirements.txt` first.")
     if args.max_cards_per_cycle < 1 or args.max_cards_per_cycle > 5:
         raise RuntimeError("--max-cards-per-cycle must be between 1 and 5.")
-    if args.scan_limit < args.max_cards_per_cycle:
-        raise RuntimeError("--scan-limit must be at least --max-cards-per-cycle.")
+    if args.scan_limit < 0:
+        raise RuntimeError("--scan-limit cannot be negative.")
+    if args.scan_limit and args.scan_limit < args.max_cards_per_cycle:
+        raise RuntimeError("--scan-limit must be 0 or at least --max-cards-per-cycle.")
     if args.cycles < 0:
         raise RuntimeError("--cycles cannot be negative.")
     if args.wait_seconds < 0:
@@ -600,15 +804,15 @@ def run(args: argparse.Namespace) -> int:
                 log(f"Starting auction cycle {cycle}{' (dry run)' if dry_run else ''}.")
                 launched = 0
                 attempted_this_cycle: set[str] = set()
+                candidates = collect_tagged_cards(
+                    page,
+                    args.tag,
+                    args.scan_limit,
+                    args.scroll_delay_ms,
+                    args.selection_delay_ms,
+                )
 
                 while launched < args.max_cards_per_cycle:
-                    candidates = collect_tagged_cards(
-                        page,
-                        args.tag,
-                        args.scan_limit,
-                        args.scroll_delay_ms,
-                        args.selection_delay_ms,
-                    )
                     previous_attempted_pass_keys = set(attempted_pass_keys)
                     card, restarted_pass = choose_next_auction_card(
                         candidates,
@@ -630,13 +834,18 @@ def run(args: argparse.Namespace) -> int:
                         break
 
                     attempted_this_cycle.add(card.key)
-                    start_price = starting_price_for_card(card, args.start_price, args.non_low_rarity_start_price)
-                    log(f"Preparing auction for '{card.title}' ({card.rarity}) at start price {start_price}.")
                     try:
                         open_collection_card(page, card, args.tag, args.selection_delay_ms)
                     except CardUnavailableError as exc:
                         log(f"Skipping unavailable card: {exc}")
                         continue
+                    if not open_card_detail_has_tag(page, args.tag):
+                        log(f"Skipping '{card.title}': card detail does not show the '{args.tag}' tag.")
+                        close_current_dialog_or_detail(page)
+                        continue
+
+                    start_price = starting_price_for_card(card, args.start_price, args.non_low_rarity_start_price)
+                    log(f"Preparing auction for '{card.title}' ({card.rarity}) at start price {start_price}.")
                     if launch_auction(page, card, start_price, args.duration, args.apply):
                         launched += 1
                     attempted_pass_keys.add(card.key)
@@ -657,7 +866,7 @@ def run(args: argparse.Namespace) -> int:
             return 130
         except Exception as exc:
             log(f"Run failed: {exc}")
-            save_failure_artifacts(page, "wikimasters-sell-shitty-cards-failure")
+            save_failure_artifacts(page, "wikimasters-sell-shitty-cards-failure", str(exc))
             return 1
         finally:
             context.close()

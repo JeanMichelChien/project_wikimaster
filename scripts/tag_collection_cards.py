@@ -57,6 +57,7 @@ DEFAULT_CACHE_PATH = ARTIFACT_DIR / "wikimasters_wikipedia_cache.json"
 LEGACY_CACHE_PATH = ARTIFACT_DIR / "plant_wikipedia_cache.json"
 DEFAULT_REPORT_PATH = ARTIFACT_DIR / "tag_report.md"
 DEFAULT_CANDIDATE_PATH = ARTIFACT_DIR / "tag_candidates.json"
+DEFAULT_CONFIRMED_TAGS_PATH = ARTIFACT_DIR / "confirmed_tags.json"
 DEFAULT_TIMEOUT_MS = 12_000
 DEFAULT_UI_JITTER_MS = 80
 UI_JITTER_MS = int(os.environ.get("WIKIMASTERS_UI_JITTER_MS", str(DEFAULT_UI_JITTER_MS)))
@@ -1300,6 +1301,13 @@ def parse_bulk_tag_result_text(text: str) -> BulkTagResult | None:
     )
 
 
+def parse_selected_count_text(text: str) -> int | None:
+    """Parse the collection selection toolbar count, when it is visible."""
+
+    match = re.search(r"(\d+)\s+cartes?\s+selectionnees?", normalize_text(text))
+    return int(match.group(1)) if match else None
+
+
 def card_to_json(card: CardRecord) -> dict[str, Any]:
     return {
         "key": card.key,
@@ -1324,6 +1332,108 @@ def card_from_json(payload: dict[str, Any]) -> CardRecord:
         page_number=int(payload["page_number"]) if payload.get("page_number") is not None else None,
         page_total=int(payload["page_total"]) if payload.get("page_total") is not None else None,
     )
+
+
+def load_confirmed_tag_keys(path: Path = DEFAULT_CONFIRMED_TAGS_PATH) -> dict[str, set[str]]:
+    """Load card/tag pairs confirmed by previous WikiMasters bulk results."""
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as exc:
+        log(f"Could not read confirmed tag cache {path}: {exc}")
+        return {}
+
+    raw_tags = payload.get("tags", {})
+    if not isinstance(raw_tags, dict):
+        return {}
+
+    canonical_by_normalized = {normalized_tag(tag): tag for tag in TAG_DEFINITIONS}
+    confirmed: dict[str, set[str]] = {}
+    for raw_tag, raw_keys in raw_tags.items():
+        canonical_tag = canonical_by_normalized.get(normalized_tag(str(raw_tag)))
+        if canonical_tag is None or not isinstance(raw_keys, list):
+            continue
+        confirmed[canonical_tag] = {str(key) for key in raw_keys if str(key)}
+    return confirmed
+
+
+def save_confirmed_tag_keys(
+    confirmed: dict[str, set[str]],
+    path: Path = DEFAULT_CONFIRMED_TAGS_PATH,
+) -> None:
+    """Persist confirmed card/tag pairs used to stabilize later dry runs."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "tags": {tag: sorted(keys) for tag, keys in sorted(confirmed.items()) if keys},
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def record_confirmed_tags(
+    target_tag: str,
+    cards: Sequence[CardRecord],
+    path: Path = DEFAULT_CONFIRMED_TAGS_PATH,
+) -> None:
+    """Remember card/tag pairs after WikiMasters reports tagged/already-tagged."""
+
+    if not cards:
+        return
+    confirmed = load_confirmed_tag_keys(path)
+    tag_keys = confirmed.setdefault(target_tag, set())
+    before_count = len(tag_keys)
+    tag_keys.update(card.key for card in cards if card.key)
+    if len(tag_keys) != before_count:
+        save_confirmed_tag_keys(confirmed, path)
+
+
+def forget_confirmed_tags(
+    target_tag: str,
+    cards: Sequence[CardRecord],
+    path: Path = DEFAULT_CONFIRMED_TAGS_PATH,
+) -> None:
+    """Remove local confirmations after this script removes a tag."""
+
+    confirmed = load_confirmed_tag_keys(path)
+    tag_keys = confirmed.get(target_tag)
+    if not tag_keys:
+        return
+    before_count = len(tag_keys)
+    for card in cards:
+        tag_keys.discard(card.key)
+    if len(tag_keys) != before_count:
+        if tag_keys:
+            confirmed[target_tag] = tag_keys
+        else:
+            confirmed.pop(target_tag, None)
+        save_confirmed_tag_keys(confirmed, path)
+
+
+def apply_confirmed_tags(
+    cards: Sequence[CardRecord],
+    confirmed: dict[str, set[str]],
+    enabled_tags: Sequence[str],
+) -> tuple[list[CardRecord], int]:
+    """Patch scanned cards with locally confirmed tags missing from grid text."""
+
+    updated_cards: list[CardRecord] = []
+    added_count = 0
+    for card in cards:
+        tags = list(card.tags)
+        for tag in enabled_tags:
+            if card.key not in confirmed.get(tag, set()) or has_target_tag(card, tag):
+                continue
+            tags.append(tag)
+            added_count += 1
+        if len(tags) == len(card.tags):
+            updated_cards.append(card)
+        else:
+            updated_cards.append(replace(card, tags=tuple(dict.fromkeys(tags))))
+    return updated_cards, added_count
 
 
 def build_candidates_by_tag(
@@ -1465,7 +1575,7 @@ def get_first_visible(candidates: Iterable[Locator], timeout_ms: int = 1_500) ->
     return None
 
 
-def save_failure_artifacts(page: Page | None, reason: str) -> None:
+def save_failure_artifacts(page: Page | None, reason: str, detail: str | None = None) -> None:
     """Write a small text file and screenshot for debugging failed browser runs."""
 
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
@@ -1477,6 +1587,7 @@ def save_failure_artifacts(page: Page | None, reason: str) -> None:
                 f"reason={reason}",
                 f"timestamp={datetime.now(timezone.utc).isoformat(timespec='seconds')}",
                 f"url={page.url if page else 'unknown'}",
+                f"detail={detail or ''}",
             ]
         )
         + "\n",
@@ -1863,7 +1974,7 @@ def go_to_collection_page(page: Page, target_page: int | None) -> None:
     ui_pause(page, 300)
 
 
-def nearby_page_numbers(page_number: int | None, page_total: int | None, radius: int = 3) -> tuple[int, ...]:
+def nearby_page_numbers(page_number: int | None, page_total: int | None, radius: int = 8) -> tuple[int, ...]:
     """Return pages to retry when a card has drifted from its recorded page."""
 
     if not page_number:
@@ -2134,7 +2245,7 @@ def filter_collection(page: Page, query: str, delay_ms: int) -> None:
     if search is None:
         raise RuntimeError("Could not find the collection search input.")
     search.fill(query)
-    ui_pause(page, delay_ms)
+    ui_pause(page, max(delay_ms, 1_200))
 
 
 def clear_collection_filter(page: Page, delay_ms: int) -> None:
@@ -2144,6 +2255,32 @@ def clear_collection_filter(page: Page, delay_ms: int) -> None:
     select_all_text(search)
     search.press("Backspace")
     ui_pause(page, delay_ms)
+
+
+def search_queries_for_card(card: CardRecord) -> tuple[str, ...]:
+    """Return progressively broader collection-search queries for one title."""
+
+    title = card.title.strip()
+    queries = [title]
+
+    no_parenthetical = re.sub(r"\s*\([^)]*\)", "", title).strip()
+    if no_parenthetical:
+        queries.append(no_parenthetical)
+
+    for separator in (",", ":", " - ", " – "):
+        if separator in title:
+            prefix = title.split(separator, 1)[0].strip()
+            if prefix:
+                queries.append(prefix)
+
+    normalized = normalize_text(title)
+    if normalized:
+        queries.append(normalized)
+        tokens = normalized.split()
+        if len(tokens) >= 2:
+            queries.append(" ".join(tokens[: min(4, len(tokens))]))
+
+    return tuple(dict.fromkeys(query for query in queries if len(query) >= 3))
 
 
 def click_select_mode(page: Page) -> None:
@@ -2209,14 +2346,45 @@ def find_visible_card_click_point(page: Page, card: CardRecord, selection_mode: 
           const rarityPattern = /^(L|UR|SR|R|PC|C)$/i;
           const viewportTop = 80;
           const viewportBottom = window.innerHeight - 90;
+          const isVisible = (element, rect) => {
+            const style = window.getComputedStyle(element);
+            return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+          };
+          const selectionPointFor = (element, cardRect) => {
+            const controls = [
+              ...element.querySelectorAll('input[type="checkbox"], [role="checkbox"], button, [role="button"]'),
+            ]
+              .map((control) => ({ control, rect: control.getBoundingClientRect() }))
+              .filter(({ control, rect }) => {
+                if (!isVisible(control, rect)) return false;
+                if (rect.width < 12 || rect.width > 52 || rect.height < 12 || rect.height > 52) return false;
+                if (rect.left < cardRect.right - 70 || rect.right > cardRect.right + 8) return false;
+                if (rect.top < cardRect.top - 8 || rect.top > cardRect.top + 78) return false;
+                if (rect.bottom < viewportTop || rect.top > viewportBottom) return false;
+                return true;
+              })
+              .map(({ rect }) => ({
+                x: rect.left + rect.width / 2,
+                y: rect.top + rect.height / 2,
+                score: 1000 - Math.abs(rect.right - cardRect.right) - Math.abs(rect.top - cardRect.top),
+              }))
+              .sort((a, b) => b.score - a.score);
+            if (controls.length) return controls[0];
+            return {
+              x: cardRect.right - Math.min(18, cardRect.width * 0.12),
+              y: Math.min(
+                Math.max(cardRect.top + Math.min(28, cardRect.height * 0.14), viewportTop),
+                viewportBottom
+              ),
+              score: 0,
+            };
+          };
           const candidates = [];
 
           for (const element of document.querySelectorAll('article, a, button, [role="button"], [role="listitem"], div')) {
             const rect = element.getBoundingClientRect();
-            const style = window.getComputedStyle(element);
             if (
-              style.visibility === 'hidden' ||
-              style.display === 'none' ||
+              !isVisible(element, rect) ||
               rect.width < 110 ||
               rect.width > 280 ||
               rect.height < 150 ||
@@ -2233,30 +2401,21 @@ def find_visible_card_click_point(page: Page, card: CardRecord, selection_mode: 
             const hasTitle = lines.some((line) => line === titleNorm || line.includes(titleNorm) || titleNorm.includes(line));
             if (!hasTitle) continue;
             const hasSubtitle = !subtitleNorm || lines.some((line) => line === subtitleNorm || line.includes(subtitleNorm));
-            const score = (hasSubtitle ? 1000 : 0) - rect.top;
-            candidates.push({ element, rect, score });
+            const selectionPoint = selectionMode ? selectionPointFor(element, rect) : null;
+            const score =
+              (hasSubtitle ? 1000 : 0) +
+              (selectionPoint && selectionPoint.score > 0 ? 700 : 0) +
+              Math.min((rect.width * rect.height) / 100, 500) -
+              rect.top / 10;
+            candidates.push({ element, rect, selectionPoint, score });
           }
 
           candidates.sort((a, b) => b.score - a.score);
           const candidate = candidates[0];
           if (!candidate) return null;
 
-          const controls = [...candidate.element.querySelectorAll('input[type="checkbox"], [role="checkbox"]')]
-            .map((control) => ({ control, rect: control.getBoundingClientRect() }))
-            .filter(({ rect }) => rect.width > 0 && rect.height > 0);
-          if (controls.length) {
-            const rect = controls[0].rect;
-            return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-          }
-
           if (selectionMode) {
-            return {
-              x: candidate.rect.right - Math.min(18, candidate.rect.width * 0.12),
-              y: Math.min(
-                Math.max(candidate.rect.top + Math.min(28, candidate.rect.height * 0.14), viewportTop),
-                viewportBottom
-              ),
-            };
+            return { x: candidate.selectionPoint.x, y: candidate.selectionPoint.y };
           }
 
           const visibleTop = Math.max(candidate.rect.top, viewportTop);
@@ -2271,32 +2430,82 @@ def find_visible_card_click_point(page: Page, card: CardRecord, selection_mode: 
     )
 
 
-def select_card(page: Page, card: CardRecord, selection_delay_ms: int) -> None:
-    """Scroll the current page, then search if needed, and click a card."""
+def read_selected_count(page: Page) -> int | None:
+    """Return the bulk-selection toolbar count, or None if it is not visible."""
 
-    point = find_card_click_point_by_scrolling(page, card, selection_delay_ms, selection_mode=True)
+    try:
+        return parse_selected_count_text(page.locator("body").inner_text(timeout=1_000))
+    except PlaywrightError:
+        return None
+
+
+def wait_for_selected_count_increase(page: Page, previous_count: int, timeout_ms: int = 2_000) -> int | None:
+    """Poll until the WikiMasters toolbar confirms one more selected card."""
+
+    deadline = time.monotonic() + timeout_ms / 1_000
+    last_count = read_selected_count(page)
+    while time.monotonic() < deadline:
+        if last_count is not None and last_count > previous_count:
+            return last_count
+        ui_pause(page, 150)
+        last_count = read_selected_count(page)
+    return last_count if last_count is not None and last_count > previous_count else None
+
+
+def select_card(page: Page, card: CardRecord, selection_delay_ms: int, force_search: bool = False) -> bool:
+    """Select one card and return whether a search filter was needed."""
+
+    point = None if force_search else find_card_click_point_by_scrolling(page, card, selection_delay_ms, selection_mode=True)
     used_filter = False
     if point is None:
-        filter_collection(page, card.title, selection_delay_ms)
-        used_filter = True
-        point = find_visible_card_click_point(page, card, selection_mode=True)
+        for query in search_queries_for_card(card):
+            filter_collection(page, query, selection_delay_ms)
+            used_filter = True
+            point = find_card_click_point_by_scrolling(
+                page,
+                card,
+                max(selection_delay_ms, 500),
+                selection_mode=True,
+            )
+            if point is not None:
+                break
     if point is None:
         page_hint = f" on page {card.page_number}" if card.page_number else ""
         raise RuntimeError(f"Could not find visible card to select{page_hint}: {card.title}")
 
-    page.mouse.click(point["x"], point["y"])
-    ui_pause(page, selection_delay_ms)
+    before_count = read_selected_count(page)
+    if before_count is None:
+        raise RuntimeError(f"Selection toolbar count is not visible before selecting: {card.title}")
+
+    for attempt in range(2):
+        if attempt > 0:
+            point = find_visible_card_click_point(page, card, selection_mode=True)
+            if point is None:
+                break
+        page.mouse.click(point["x"], point["y"])
+        ui_pause(page, selection_delay_ms)
+        after_count = wait_for_selected_count_increase(page, before_count)
+        if after_count is not None:
+            return used_filter
+
     if used_filter:
         clear_collection_filter(page, selection_delay_ms)
 
+    current_count = read_selected_count(page)
+    count_hint = "unknown" if current_count is None else str(current_count)
+    raise RuntimeError(
+        f"Click did not select card: {card.title}; selection count stayed at {before_count} "
+        f"(current: {count_hint})."
+    )
 
-def select_card_with_page_fallback(page: Page, card: CardRecord, selection_delay_ms: int) -> int | None:
+
+def select_card_with_page_fallback(page: Page, card: CardRecord, selection_delay_ms: int) -> tuple[int | None, bool]:
     """Select a card, retrying nearby pages if pagination shifted after mutations."""
 
     tried_pages = [card.page_number] if card.page_number else []
     try:
-        select_card(page, card, selection_delay_ms)
-        return card.page_number
+        used_filter = select_card(page, card, selection_delay_ms)
+        return card.page_number, used_filter
     except RuntimeError as first_error:
         last_error = first_error
 
@@ -2309,9 +2518,9 @@ def select_card_with_page_fallback(page: Page, card: CardRecord, selection_delay
             go_to_collection_page(page, fallback_page)
             click_select_mode(page)
             clear_collection_filter(page, selection_delay_ms)
-            select_card(page, card, selection_delay_ms)
+            used_filter = select_card(page, card, selection_delay_ms)
             log(f"Found '{card.title}' on page {fallback_page} after recorded page {card.page_number}.")
-            return fallback_page
+            return fallback_page, used_filter
         except RuntimeError as exc:
             tried_pages.append(fallback_page)
             last_error = exc
@@ -2366,6 +2575,9 @@ def click_bulk_tag_menu(page: Page) -> None:
             const rect = element.getBoundingClientRect();
             const style = window.getComputedStyle(element);
             if (style.visibility === 'hidden' || style.display === 'none' || rect.width < 24 || rect.height < 24) {
+              continue;
+            }
+            if (element.disabled || element.getAttribute('aria-disabled') === 'true' || element.hasAttribute('disabled')) {
               continue;
             }
             const text = normalize([
@@ -2820,7 +3032,51 @@ def remove_tag_from_card_detail(page: Page, card: CardRecord, target_tag: str, d
     raise RuntimeError(f"Tag chip '{target_tag}' was still visible after removal click on {card.title}.")
 
 
-def iter_page_batches(cards: Sequence[CardRecord], batch_size: int) -> Iterable[tuple[int | None, list[CardRecord]]]:
+def apply_single_card_by_search(
+    page: Page,
+    card: CardRecord,
+    target_tag: str,
+    selection_delay_ms: int,
+    batch_delay_ms: int,
+    confirmed_tags_path: Path = DEFAULT_CONFIRMED_TAGS_PATH,
+) -> None:
+    """Apply one tag via search first, then nearby pages if search misses."""
+
+    page.goto(COLLECTION_URL, wait_until="domcontentloaded")
+    settle_page(page)
+    click_select_mode(page)
+    clear_collection_filter(page, selection_delay_ms)
+    try:
+        select_card(page, card, selection_delay_ms, force_search=True)
+    except RuntimeError as search_error:
+        log(f"Search fallback could not find '{card.title}'; retrying recorded/nearby pages.")
+        page.goto(COLLECTION_URL, wait_until="domcontentloaded")
+        settle_page(page)
+        go_to_collection_page(page, card.page_number)
+        click_select_mode(page)
+        clear_collection_filter(page, selection_delay_ms)
+        try:
+            select_card_with_page_fallback(page, card, selection_delay_ms)
+        except RuntimeError as page_error:
+            raise RuntimeError(f"{search_error}; page fallback also failed: {page_error}") from page_error
+
+    actual_selected_count = read_selected_count(page)
+    if actual_selected_count is not None and actual_selected_count < 1:
+        raise RuntimeError(f"Expected 1 selected card before tagging '{target_tag}', but the UI shows {actual_selected_count}.")
+
+    ui_pause(page, batch_delay_ms)
+    bulk_result = add_tag_to_selected(page, target_tag)
+    ui_pause(page, batch_delay_ms)
+    if bulk_result is None or bulk_result.successful_count < 1:
+        verify_batch_tags(page, [card], target_tag, selection_delay_ms)
+    record_confirmed_tags(target_tag, [card], confirmed_tags_path)
+
+
+def iter_page_batches(
+    cards: Sequence[CardRecord],
+    batch_size: int,
+    descending: bool = False,
+) -> Iterable[tuple[int | None, list[CardRecord]]]:
     """Yield mutation batches that never span collection pages."""
 
     cards_by_page: dict[int | None, list[CardRecord]] = {}
@@ -2830,7 +3086,7 @@ def iter_page_batches(cards: Sequence[CardRecord], batch_size: int) -> Iterable[
     def page_sort_key(page_number: int | None) -> int:
         return page_number if page_number is not None else 1_000_000
 
-    for page_number in sorted(cards_by_page, key=page_sort_key):
+    for page_number in sorted(cards_by_page, key=page_sort_key, reverse=descending):
         page_cards = cards_by_page[page_number]
         for start in range(0, len(page_cards), batch_size):
             yield page_number, list(page_cards[start : start + batch_size])
@@ -2843,12 +3099,13 @@ def apply_tag_batches(
     batch_size: int,
     selection_delay_ms: int,
     batch_delay_ms: int,
+    confirmed_tags_path: Path = DEFAULT_CONFIRMED_TAGS_PATH,
 ) -> list[CardRecord]:
     """Apply one target tag to candidates in small, verified UI batches."""
 
     validate_apply_candidates_for_tag(cards, target_tag)
     applied: list[CardRecord] = []
-    batches = list(iter_page_batches(cards, batch_size))
+    batches = list(iter_page_batches(cards, batch_size, descending=True))
     for batch_index, (page_number, batch) in enumerate(batches, start=1):
         page.goto(COLLECTION_URL, wait_until="domcontentloaded")
         settle_page(page)
@@ -2859,23 +3116,58 @@ def apply_tag_batches(
         page_hint = f" on page {page_number}" if page_number else ""
         log(f"Selecting {len(batch)} card(s){page_hint} for batch {batch_index}/{len(batches)}.")
         selected_count = 0
+        retry_individually = False
+        retry_reason = ""
         for card in batch:
             try:
-                select_card_with_page_fallback(page, card, selection_delay_ms)
-            except RuntimeError:
-                if selected_count > 0:
-                    raise RuntimeError(
-                        "A later card in the batch drifted to another page after earlier selections. "
-                        "Retry with --batch-size 1."
-                    )
+                selected_page, used_filter = select_card_with_page_fallback(page, card, selection_delay_ms)
+            except RuntimeError as exc:
+                if selected_count > 0 and len(batch) > 1:
+                    retry_individually = True
+                    retry_reason = str(exc)
+                    break
                 raise
+            if len(batch) > 1 and used_filter:
+                retry_individually = True
+                retry_reason = f"'{card.title}' required collection search, which resets multi-selection."
+                break
+            if len(batch) > 1 and selected_page != page_number:
+                retry_individually = True
+                retry_reason = f"'{card.title}' moved from recorded page {page_number} to page {selected_page}."
+                break
             selected_count += 1
+
+        if retry_individually:
+            log(
+                f"Batch {batch_index}/{len(batches)} cannot stay on one page ({retry_reason}) "
+                "Retrying its cards one by one via search."
+            )
+            for card in batch:
+                apply_single_card_by_search(
+                    page,
+                    card,
+                    target_tag,
+                    selection_delay_ms,
+                    batch_delay_ms,
+                    confirmed_tags_path,
+                )
+                applied.append(card)
+                log(f"Applied '{target_tag}' to {len(applied)}/{len(cards)} candidate card(s).")
+            continue
+
+        actual_selected_count = read_selected_count(page)
+        if actual_selected_count is not None and actual_selected_count < len(batch):
+            raise RuntimeError(
+                f"Expected at least {len(batch)} selected card(s) before tagging '{target_tag}', "
+                f"but the UI shows {actual_selected_count}."
+            )
 
         ui_pause(page, batch_delay_ms)
         bulk_result = add_tag_to_selected(page, target_tag)
         ui_pause(page, batch_delay_ms)
         if bulk_result is None or bulk_result.successful_count < len(batch):
             verify_batch_tags(page, batch, target_tag, selection_delay_ms)
+        record_confirmed_tags(target_tag, batch, confirmed_tags_path)
         applied.extend(batch)
         log(f"Applied '{target_tag}' to {len(applied)}/{len(cards)} candidate card(s).")
 
@@ -2889,6 +3181,7 @@ def remove_tag_batches(
     batch_size: int,
     selection_delay_ms: int,
     batch_delay_ms: int,
+    confirmed_tags_path: Path = DEFAULT_CONFIRMED_TAGS_PATH,
 ) -> list[CardRecord]:
     """Remove one target tag from already-tagged cards via verified detail chips."""
 
@@ -2900,6 +3193,7 @@ def remove_tag_batches(
         for card in batch:
             remove_tag_from_card_detail(page, card, target_tag, selection_delay_ms)
             verify_batch_tags_removed(page, [card], target_tag, selection_delay_ms)
+            forget_confirmed_tags(target_tag, [card], confirmed_tags_path)
             removed.append(card)
             log(f"Removed '{target_tag}' from {len(removed)}/{len(cards)} invalid existing card(s).")
             ui_pause(page, batch_delay_ms)
@@ -3113,6 +3407,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cache-path", type=Path, default=DEFAULT_CACHE_PATH, help="Wikipedia metadata cache path.")
     parser.add_argument("--report-path", type=Path, default=DEFAULT_REPORT_PATH, help="Markdown report output path.")
     parser.add_argument("--candidate-path", type=Path, default=DEFAULT_CANDIDATE_PATH, help="JSON candidate artifact path.")
+    parser.add_argument(
+        "--confirmed-tags-path",
+        type=Path,
+        default=DEFAULT_CONFIRMED_TAGS_PATH,
+        help="Local cache of card/tag pairs confirmed by previous WikiMasters bulk results.",
+    )
     return parser
 
 
@@ -3197,12 +3497,17 @@ def run(args: argparse.Namespace) -> int:
                         args.batch_size,
                         args.selection_delay_ms,
                         args.batch_delay_ms,
+                        args.confirmed_tags_path,
                     )
                 total_applied = sum(len(tag_cards) for tag_cards in applied.values())
                 log(f"Run completed successfully. Applied {total_applied} saved candidate card/tag addition(s).")
                 return 0
 
             cards = scan_collection(page, args.max_cards, args.scroll_delay_ms)
+            confirmed_tags = load_confirmed_tag_keys(args.confirmed_tags_path)
+            cards, confirmed_count = apply_confirmed_tags(cards, confirmed_tags, enabled_tags)
+            if confirmed_count:
+                log(f"Applied {confirmed_count} locally confirmed card/tag pair(s) to the scanned grid data.")
             cards_needing_any_enabled_tag_check = [
                 card
                 for card in cards
@@ -3270,6 +3575,7 @@ def run(args: argparse.Namespace) -> int:
                         args.batch_size,
                         args.selection_delay_ms,
                         args.batch_delay_ms,
+                        args.confirmed_tags_path,
                     )
 
                 write_report(
@@ -3305,6 +3611,7 @@ def run(args: argparse.Namespace) -> int:
                     args.batch_size,
                     args.selection_delay_ms,
                     args.batch_delay_ms,
+                    args.confirmed_tags_path,
                 )
 
             write_report(
@@ -3334,7 +3641,7 @@ def run(args: argparse.Namespace) -> int:
                     removed=removed,
                     sample_per_tag=args.sample_per_tag,
                 )
-            save_failure_artifacts(page, "wikimasters-tag-cards-failure")
+            save_failure_artifacts(page, "wikimasters-tag-cards-failure", str(exc))
             return 1
         finally:
             context.close()
