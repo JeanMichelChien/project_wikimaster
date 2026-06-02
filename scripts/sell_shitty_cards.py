@@ -634,17 +634,6 @@ def set_duration(page: Page, duration_label: str) -> bool:
     if changed_select:
         return True
 
-    duration_control = get_first_visible(
-        [
-            page.get_by_role("combobox", name=re.compile("durée|duree", re.IGNORECASE)),
-            page.get_by_text(re.compile("durée|duree", re.IGNORECASE)),
-        ],
-        timeout_ms=1_000,
-    )
-    if duration_control is not None:
-        duration_control.click(timeout=3_000)
-        ui_pause(page, 400)
-
     return click_control_with_words(page, normalized_words(duration_label), timeout_ms=2_000)
 
 
