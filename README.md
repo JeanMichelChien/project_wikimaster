@@ -296,6 +296,8 @@ Body:
 
 Use a fine-grained token scoped only to this repository with `Actions: Read and write`.
 
+Failure artifacts are uploaded only while the repository is private, because screenshots and page metadata may include authenticated WikiMasters account state.
+
 ## Tests
 
 Run static and unit checks:
@@ -317,9 +319,9 @@ Run static and unit checks:
 
 ## Security Notes
 
-- Keep credentials and local runtime artifacts out of the repository.
 - Never commit `.env` files or real credentials.
 - Use GitHub repository secrets for CI credentials.
 - Store the cron-job.org GitHub token only in cron-job.org.
 - Use a fine-grained GitHub token with only `Actions: Read and write` on this repository.
 - Rotate the cron-job.org token and WikiMasters password if either is exposed.
+- Do not publish local ignored files such as `.env`, `.venv/`, `.vscode/`, or `artifacts/`.
