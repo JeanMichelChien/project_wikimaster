@@ -111,6 +111,12 @@ To force a fresh scan and apply in one command:
 python3 scripts/tag_collection_cards.py --apply --tags plante --batch-size 1
 ```
 
+Apply all topic tags except `à bicrave`:
+
+```bash
+python3 scripts/tag_collection_cards.py --apply --tags plante,philo,scam,train,rivière,souterrains --batch-size 1
+```
+
 Audit existing tags and report cards whose current tag no longer matches the classifier:
 
 ```bash
