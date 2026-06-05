@@ -79,6 +79,7 @@ Useful focused dry runs:
 
 ```bash
 python3 scripts/tag_collection_cards.py --tags plante
+python3 scripts/tag_collection_cards.py --tags rivière
 python3 scripts/tag_collection_cards.py --tags philo,scam --sample-per-tag 10
 python3 scripts/tag_collection_cards.py --tags "à bicrave"
 ```
@@ -168,6 +169,7 @@ Supported tags:
 - `philo`: core philosophy people, schools, concepts, works, arguments, and institutions.
 - `scam`: central scams, fraud cases, Ponzi schemes, fraudsters, and fraudulent organizations.
 - `train`: train objects only, such as trains, locomotives, rolling stock, types, classes, and models.
+- `rivière`: rivers and natural watercourses only, such as rivers, fleuves, streams, torrents, and tributaries.
 - `souterrains`: underground structures and places, such as caves, tunnels, mines, catacombs, bunkers, and underground complexes.
 - `à bicrave`: low-rarity untagged cards to sell.
 

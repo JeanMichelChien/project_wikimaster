@@ -63,7 +63,7 @@ DEFAULT_UI_JITTER_MS = 80
 UI_JITTER_MS = int(os.environ.get("WIKIMASTERS_UI_JITTER_MS", str(DEFAULT_UI_JITTER_MS)))
 RARITY_PATTERN = re.compile(r"^(L|UR|SR|R|PC|C)$", re.IGNORECASE)
 PAGE_COUNTER_PATTERN = re.compile(r"Page\s+(\d+)\s*/\s*(\d+)", re.IGNORECASE)
-SUPPORTED_TAGS = ("plante", "philo", "scam", "train", "souterrains", "à bicrave")
+SUPPORTED_TAGS = ("plante", "philo", "scam", "train", "rivière", "souterrains", "à bicrave")
 DEFAULT_TAGS = ",".join(SUPPORTED_TAGS)
 
 # Phrase lists are intentionally conservative: each classifier needs central
@@ -508,6 +508,114 @@ UNDERGROUND_NEGATIVE_PHRASES = (
     "actrice",
     "homme politique",
     "femme politique",
+)
+
+RIVER_WATERCOURSE_PHRASES = (
+    "rivière",
+    "fleuve",
+    "cours d'eau",
+    "affluent",
+    "sous-affluent",
+    "ruisseau",
+    "torrent",
+    "oued",
+    "wadi",
+    "fleuve côtier",
+    "rivière endoréique",
+)
+RIVER_CATEGORY_PHRASES = (
+    "rivière",
+    "fleuve",
+    "cours d'eau",
+    "affluent",
+    "ruisseau",
+    "torrent",
+    "oued",
+)
+RIVER_HARD_NEGATIVE_PHRASES = (
+    "commune",
+    "ville",
+    "village",
+    "localite",
+    "municipalite",
+    "departement",
+    "region",
+    "province",
+    "district",
+    "canton",
+    "arrondissement",
+    "comte",
+    "pays",
+    "territoire",
+    "parc national",
+    "gare",
+    "station",
+    "pont",
+    "barrage",
+    "canal",
+    "aqueduc",
+    "lac",
+    "mer",
+    "ocean",
+    "detroit",
+    "golfe",
+    "baie",
+    "ile",
+    "archipel",
+    "cascade",
+    "chute d'eau",
+    "glacier",
+    "vallee",
+    "montagne",
+    "colline",
+    "bassin versant",
+    "bassin hydrographique",
+    "delta",
+    "estuaire",
+    "film",
+    "serie televisee",
+    "roman",
+    "chanson",
+    "album",
+    "jeu video",
+    "peinture",
+    "tableau",
+    "personnage",
+    "acteur",
+    "actrice",
+    "ecrivain",
+    "ecrivaine",
+    "homme politique",
+    "femme politique",
+    "bataille",
+    "guerre",
+    "catastrophe",
+    "accident",
+    "page d'homonymie",
+    "homonymie",
+    "page de liste",
+    "liste",
+)
+RIVER_CATEGORY_NEGATIVE_PHRASES = (
+    "commune",
+    "ville",
+    "village",
+    "departement",
+    "district",
+    "gare",
+    "station",
+    "pont",
+    "barrage",
+    "canal",
+    "lac",
+    "cascade",
+    "film",
+    "roman",
+    "chanson",
+    "album",
+    "bataille",
+    "homonymie",
+    "liste",
 )
 
 BICRAVE_LOW_RARITIES = {"C", "PC"}
@@ -1174,6 +1282,56 @@ def classify_souterrains_card(card: CardRecord, metadata: WikipediaMetadata | No
     )
 
 
+def classify_riviere_card(card: CardRecord, metadata: WikipediaMetadata | None = None) -> TagClassification:
+    """Match rivers and natural watercourses, excluding places or works named after rivers."""
+
+    visible_text = f"{card.subtitle} {' '.join(card.tags)}"
+    description_text, extract_text, category_text = metadata_text(metadata)
+    negative_primary_text = " ".join([card.title, card.subtitle, description_text])
+    score = 0
+    reasons: list[str] = []
+
+    visible_watercourse = phrase_matches(visible_text, RIVER_WATERCOURSE_PHRASES)
+    description_watercourse = phrase_matches(description_text, RIVER_WATERCOURSE_PHRASES)
+    category_watercourse = list(
+        dict.fromkeys(
+            phrase_matches(category_text, RIVER_CATEGORY_PHRASES)
+            + phrase_matches(category_text, RIVER_WATERCOURSE_PHRASES)
+        )
+    )
+    extract_watercourse = phrase_matches(extract_text, RIVER_WATERCOURSE_PHRASES)
+    hard_negative = phrase_matches(negative_primary_text, RIVER_HARD_NEGATIVE_PHRASES)
+    category_negative = phrase_matches(category_text, RIVER_CATEGORY_NEGATIVE_PHRASES)
+
+    if visible_watercourse:
+        score += 10
+        reasons.append(f"visible river/watercourse term: {visible_watercourse[0]}")
+    if description_watercourse:
+        score += 8
+        reasons.append(f"Wikipedia description river/watercourse term: {description_watercourse[0]}")
+    if category_watercourse:
+        score += 7
+        reasons.append(f"Wikipedia category river/watercourse term: {category_watercourse[0]}")
+    if extract_watercourse:
+        score += 2
+        reasons.append(f"Wikipedia extract river/watercourse support: {extract_watercourse[0]}")
+    if hard_negative:
+        score -= 20
+        reasons.append(f"excluded non-river context: {hard_negative[0]}")
+    if category_negative:
+        score -= 8
+        reasons.append(f"excluded non-river category: {category_negative[0]}")
+
+    primary_evidence = bool(visible_watercourse or description_watercourse or category_watercourse)
+    is_match = primary_evidence and score >= 6 and not hard_negative and not category_negative
+    return TagClassification(
+        tag="rivière",
+        is_match=is_match,
+        score=score,
+        reason=unique_reason(reasons, "no river/watercourse evidence found"),
+    )
+
+
 def classify_a_bicrave_card(card: CardRecord, metadata: WikipediaMetadata | None = None) -> TagClassification:
     """Match low-rarity untagged cards that are intentionally marked for resale."""
 
@@ -1244,6 +1402,7 @@ TAG_DEFINITIONS: dict[str, TagDefinition] = {
     "philo": TagDefinition("philo", "core philosophy people, schools, concepts, works, and institutions", classify_philo_card),
     "scam": TagDefinition("scam", "central scams, fraud cases, Ponzi schemes, fraudsters, and fraudulent organizations", classify_scam_card),
     "train": TagDefinition("train", "train objects only, including trains, locomotives, rolling stock, types, classes, and models", classify_train_card),
+    "rivière": TagDefinition("rivière", "rivers and natural watercourses only", classify_riviere_card),
     "souterrains": TagDefinition("souterrains", "underground structures and places only", classify_souterrains_card),
     "à bicrave": TagDefinition(
         "à bicrave",

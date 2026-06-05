@@ -285,6 +285,7 @@ class TopicClassifierTests(unittest.TestCase):
     def test_parse_tags_arg_validates_supported_tags(self) -> None:
         self.assertEqual(parse_tags_arg("plante,philo,plante"), ("plante", "philo"))
         self.assertEqual(parse_tags_arg("a bicrave"), ("à bicrave",))
+        self.assertEqual(parse_tags_arg("riviere"), ("rivière",))
         with self.assertRaises(ValueError):
             parse_tags_arg("plante,inconnu")
 
@@ -583,6 +584,49 @@ class TopicClassifierTests(unittest.TestCase):
         self.assert_tag_miss("souterrains", district, district_metadata)
         self.assert_tag_miss("souterrains", engraving)
         self.assert_tag_miss("souterrains", writer)
+
+    def test_riviere_matches_rivers_and_watercourses(self) -> None:
+        seine = make_card("Seine", "fleuve francais")
+        seine_metadata = WikipediaMetadata(
+            title="Seine",
+            description="fleuve francais",
+            categories=("Fleuve cotier en France",),
+        )
+        allier = make_card("Allier", "")
+        allier_metadata = WikipediaMetadata(
+            title="Allier",
+            description="riviere francaise, principal affluent de la Loire",
+            categories=("Cours d'eau en France", "Affluent de la Loire"),
+        )
+        ruisseau = make_card("Ruisseau du Moulin", "ruisseau francais")
+
+        self.assert_tag_match("rivière", seine, seine_metadata)
+        self.assert_tag_match("rivière", allier, allier_metadata)
+        self.assert_tag_match("rivière", ruisseau)
+
+    def test_riviere_excludes_named_places_media_and_other_water_features(self) -> None:
+        city = make_card("Riviere-du-Loup", "ville du Quebec")
+        city_metadata = WikipediaMetadata(
+            title="Riviere-du-Loup",
+            description="ville du Quebec",
+            categories=("Ville au Quebec",),
+        )
+        bridge = make_card("Pont de la riviere Kwai", "film britannique")
+        canal = make_card("Canal du Midi", "canal francais")
+        canal_metadata = WikipediaMetadata(
+            title="Canal du Midi",
+            description="canal francais",
+            extract="Le canal est un cours d'eau artificiel.",
+            categories=("Canal en France",),
+        )
+        lake = make_card("Lac Victoria", "lac africain")
+        homonymy = make_card("Riviere Rouge", "page d'homonymie")
+
+        self.assert_tag_miss("rivière", city, city_metadata)
+        self.assert_tag_miss("rivière", bridge)
+        self.assert_tag_miss("rivière", canal, canal_metadata)
+        self.assert_tag_miss("rivière", lake)
+        self.assert_tag_miss("rivière", homonymy)
 
     def test_a_bicrave_matches_only_low_rarity_untagged_resale_topics(self) -> None:
         village = make_card("Saint-Cierge-la-Serre", "commune francaise", rarity="C")
