@@ -1,0 +1,26 @@
+name: Opened Cards Summary
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: wikimasters-opened-cards-summary
+  cancel-in-progress: false
+
+jobs:
+  opened-cards-summary:
+    name: Summarize opened cards
+    runs-on: [self-hosted, ubuntu, homelab, repo-wikimaster]
+    timeout-minutes: 10
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Build opened cards summary
+        run: python3 scripts/daily_card_summary.py --workflow open-wikimasters-packs.yml --lookback-hours 24
