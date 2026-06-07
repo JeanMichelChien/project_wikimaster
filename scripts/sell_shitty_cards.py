@@ -100,10 +100,15 @@ DEFAULT_LOW_RARITY_START_PRICE = 10
 DEFAULT_NON_LOW_RARITY_START_PRICE = 40
 DEFAULT_SELL_STATE_PATH = ARTIFACT_DIR / "sell_auction_state.json"
 NEVER_SELL_RARITIES = {"L"}
+ACTIVE_AUCTION_SLOTS_PATTERN = re.compile(r"\bencheres actives\s+(\d+)\s*/\s*(\d+)\b")
 
 
 class CardUnavailableError(RuntimeError):
     """Raised when a pre-scanned card is no longer visible in the filtered collection."""
+
+
+class AuctionSlotsFullError(RuntimeError):
+    """Raised when WikiMasters reports that no active auction slot is available."""
 
 
 def normalized_words(value: str) -> list[str]:
@@ -227,6 +232,37 @@ def detail_text_has_tag(detail_text: str, target_tag: str) -> bool:
     return bool(re.search(rf"(?<![a-z0-9]){re.escape(normalized_target)}(?![a-z0-9])", normalized_detail))
 
 
+def parse_active_auction_slots(detail_text: str) -> tuple[int, int] | None:
+    """Return the active-auction count shown on the card detail, when present."""
+
+    match = ACTIVE_AUCTION_SLOTS_PATTERN.search(normalize_text(detail_text))
+    if not match:
+        return None
+    active_count = int(match.group(1))
+    active_limit = int(match.group(2))
+    return active_count, active_limit
+
+
+def read_active_auction_slots(page: Page) -> tuple[int, int] | None:
+    """Read the current active-auction slot count from the open card detail."""
+
+    return parse_active_auction_slots(read_card_detail_text(page))
+
+
+def assert_auction_slot_available(page: Page) -> None:
+    """Stop before clicking a disabled seller button when WikiMasters slots are full."""
+
+    slots = read_active_auction_slots(page)
+    if slots is None:
+        return
+    active_count, active_limit = slots
+    if active_limit > 0 and active_count >= active_limit:
+        raise AuctionSlotsFullError(
+            f"active auction slots are full ({active_count}/{active_limit}); "
+            "waiting for an auction to finish before launching more."
+        )
+
+
 def open_card_detail_has_tag(page: Page, target_tag: str) -> bool:
     """Verify the selected card itself has the tag before opening the auction form."""
 
@@ -262,6 +298,9 @@ def click_control_with_words(page: Page, words: Sequence[str], timeout_ms: int =
                 if (
                   style.visibility === 'hidden' ||
                   style.display === 'none' ||
+                  style.pointerEvents === 'none' ||
+                  element.disabled === true ||
+                  element.getAttribute('aria-disabled') === 'true' ||
                   rect.width < 20 ||
                   rect.height < 20 ||
                   rect.bottom < 0 ||
@@ -280,6 +319,137 @@ def click_control_with_words(page: Page, words: Sequence[str], timeout_ms: int =
                   y: rect.top + rect.height / 2,
                   score: (element.tagName.toLowerCase() === 'button' ? 1000 : 0) - rect.top,
                   text,
+                });
+              }
+              candidates.sort((a, b) => b.score - a.score);
+              return candidates[0] || null;
+            }
+            """,
+            wanted_words,
+        )
+        if point:
+            page.mouse.click(point["x"], point["y"])
+            ui_pause(page, 500)
+            return True
+        ui_pause(page, 200)
+    return False
+
+
+def auction_form_is_visible(page: Page) -> bool:
+    """Return whether the auction form dialog is visible, not just the card detail."""
+
+    try:
+        return bool(
+            page.evaluate(
+                """
+                () => {
+                  const normalize = (value) =>
+                    (value || '')
+                      .normalize('NFD')
+                      .replace(/[\\u0300-\\u036f]/g, '')
+                      .toLowerCase()
+                      .replace(/[^a-z0-9'/ -]+/g, ' ')
+                      .replace(/\\s+/g, ' ')
+                      .trim();
+                  const isVisible = (element, rect) => {
+                    const style = window.getComputedStyle(element);
+                    return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+                  };
+                  for (const element of document.querySelectorAll('[role="dialog"], [aria-modal="true"], div')) {
+                    const rect = element.getBoundingClientRect();
+                    if (!isVisible(element, rect) || rect.width < 360 || rect.height < 260) continue;
+                    const text = normalize(element.innerText || '');
+                    if (
+                      text.includes('mettre aux encheres') &&
+                      text.includes('mise de depart') &&
+                      text.includes('duree') &&
+                      text.includes("lancer l'enchere")
+                    ) {
+                      return true;
+                    }
+                  }
+                  return false;
+                }
+                """
+            )
+        )
+    except PlaywrightError:
+        return False
+
+
+def wait_for_auction_form(page: Page, timeout_ms: int = 2_500) -> bool:
+    """Wait briefly for the auction dialog after clicking the card-detail sell button."""
+
+    deadline = time.monotonic() + timeout_ms / 1_000
+    while time.monotonic() < deadline:
+        if auction_form_is_visible(page):
+            return True
+        ui_pause(page, 150)
+    return auction_form_is_visible(page)
+
+
+def click_auction_form_control_with_words(page: Page, words: Sequence[str], timeout_ms: int = 3_000) -> bool:
+    """Click a visible control inside the auction form whose text contains all words."""
+
+    wanted_words = [normalize_text(word) for word in words if normalize_text(word)]
+    deadline = time.monotonic() + timeout_ms / 1_000
+    while time.monotonic() < deadline:
+        point = page.evaluate(
+            """
+            (wantedWords) => {
+              const normalize = (value) =>
+                (value || '')
+                  .normalize('NFD')
+                  .replace(/[\\u0300-\\u036f]/g, '')
+                  .toLowerCase()
+                  .replace(/[^a-z0-9'/ -]+/g, ' ')
+                  .replace(/\\s+/g, ' ')
+                  .trim();
+              const isVisible = (element, rect) => {
+                const style = window.getComputedStyle(element);
+                return (
+                  style.visibility !== 'hidden' &&
+                  style.display !== 'none' &&
+                  style.pointerEvents !== 'none' &&
+                  rect.width > 0 &&
+                  rect.height > 0
+                );
+              };
+              const dialogs = [...document.querySelectorAll('[role="dialog"], [aria-modal="true"], div')]
+                .map((element) => {
+                  const rect = element.getBoundingClientRect();
+                  if (!isVisible(element, rect) || rect.width < 360 || rect.height < 260) return null;
+                  const text = normalize(element.innerText || '');
+                  if (
+                    !text.includes('mettre aux encheres') ||
+                    !text.includes('mise de depart') ||
+                    !text.includes('duree') ||
+                    !text.includes("lancer l'enchere")
+                  ) {
+                    return null;
+                  }
+                  return { element, area: rect.width * rect.height };
+                })
+                .filter(Boolean)
+                .sort((a, b) => a.area - b.area);
+              const dialog = dialogs[0]?.element;
+              if (!dialog) return null;
+
+              const candidates = [];
+              for (const element of dialog.querySelectorAll('button, [role="button"], a, [role="menuitem"], [role="option"]')) {
+                const rect = element.getBoundingClientRect();
+                if (!isVisible(element, rect)) continue;
+                if (element.disabled === true || element.getAttribute('aria-disabled') === 'true') continue;
+                const text = normalize([
+                  element.innerText,
+                  element.getAttribute('aria-label'),
+                  element.getAttribute('title'),
+                ].filter(Boolean).join(' '));
+                if (!wantedWords.every((word) => text.includes(word))) continue;
+                candidates.push({
+                  x: rect.left + rect.width / 2,
+                  y: rect.top + rect.height / 2,
+                  score: (element.tagName.toLowerCase() === 'button' ? 1000 : 0) - rect.top,
                 });
               }
               candidates.sort((a, b) => b.score - a.score);
@@ -563,12 +733,35 @@ def fill_starting_bid(page: Page, start_price: int) -> bool:
                   .replace(/[^a-z0-9'/ -]+/g, ' ')
                   .replace(/\\s+/g, ' ')
                   .trim();
-              const inputs = [...document.querySelectorAll('input')];
+              const isVisible = (element, rect) => {
+                const style = window.getComputedStyle(element);
+                return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+              };
+              const dialogs = [...document.querySelectorAll('[role="dialog"], [aria-modal="true"], div')]
+                .map((element) => {
+                  const rect = element.getBoundingClientRect();
+                  if (!isVisible(element, rect) || rect.width < 360 || rect.height < 260) return null;
+                  const text = normalize(element.innerText || '');
+                  if (
+                    !text.includes('mettre aux encheres') ||
+                    !text.includes('mise de depart') ||
+                    !text.includes('duree') ||
+                    !text.includes("lancer l'enchere")
+                  ) {
+                    return null;
+                  }
+                  return { element, area: rect.width * rect.height };
+                })
+                .filter(Boolean)
+                .sort((a, b) => a.area - b.area);
+              const dialog = dialogs[0]?.element;
+              if (!dialog) return false;
+
+              const inputs = [...dialog.querySelectorAll('input')];
               const candidates = inputs
                 .map((input) => {
                   const rect = input.getBoundingClientRect();
-                  const style = window.getComputedStyle(input);
-                  if (style.visibility === 'hidden' || style.display === 'none' || rect.width <= 0 || rect.height <= 0) return null;
+                  if (!isVisible(input, rect)) return null;
                   const id = input.id || '';
                   const label = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
                   const container = input.closest('[role="dialog"], form, div');
@@ -585,7 +778,8 @@ def fill_starting_bid(page: Page, start_price: int) -> bool:
                 })
                 .filter(Boolean)
                 .sort((a, b) => b.score - a.score);
-              const candidate = candidates[0]?.input;
+              const candidate = candidates.find((item) => item.score > 0)?.input ||
+                (candidates.length === 1 ? candidates[0].input : null);
               if (!candidate) return false;
               candidate.focus();
               candidate.value = String(price);
@@ -613,11 +807,33 @@ def set_duration(page: Page, duration_label: str) -> bool:
               .replace(/[^a-z0-9'/ -]+/g, ' ')
               .replace(/\\s+/g, ' ')
               .trim();
+          const isVisible = (element, rect) => {
+            const style = window.getComputedStyle(element);
+            return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+          };
+          const dialogs = [...document.querySelectorAll('[role="dialog"], [aria-modal="true"], div')]
+            .map((element) => {
+              const rect = element.getBoundingClientRect();
+              if (!isVisible(element, rect) || rect.width < 360 || rect.height < 260) return null;
+              const text = normalize(element.innerText || '');
+              if (
+                !text.includes('mettre aux encheres') ||
+                !text.includes('mise de depart') ||
+                !text.includes('duree') ||
+                !text.includes("lancer l'enchere")
+              ) {
+                return null;
+              }
+              return { element, area: rect.width * rect.height };
+            })
+            .filter(Boolean)
+            .sort((a, b) => a.area - b.area);
+          const dialog = dialogs[0]?.element;
+          if (!dialog) return false;
           const wantedText = normalize(wanted);
-          for (const select of document.querySelectorAll('select')) {
+          for (const select of dialog.querySelectorAll('select')) {
             const rect = select.getBoundingClientRect();
-            const style = window.getComputedStyle(select);
-            if (style.visibility === 'hidden' || style.display === 'none' || rect.width <= 0 || rect.height <= 0) continue;
+            if (!isVisible(select, rect)) continue;
             const options = [...select.options];
             const option = options.find((candidate) => normalize(candidate.textContent || '').includes(wantedText));
             if (!option) continue;
@@ -634,7 +850,7 @@ def set_duration(page: Page, duration_label: str) -> bool:
     if changed_select:
         return True
 
-    return click_control_with_words(page, normalized_words(duration_label), timeout_ms=2_000)
+    return click_auction_form_control_with_words(page, normalized_words(duration_label), timeout_ms=2_000)
 
 
 def close_current_dialog_or_detail(page: Page) -> None:
@@ -664,7 +880,12 @@ def close_current_dialog_or_detail(page: Page) -> None:
 def launch_auction(page: Page, card: CardRecord, start_price: int, duration_label: str, apply: bool) -> bool:
     """Open the auction form and optionally submit it."""
 
+    if apply:
+        assert_auction_slot_available(page)
+
     if not click_control_with_words(page, ("mettre", "encheres"), timeout_ms=3_000):
+        if apply:
+            assert_auction_slot_available(page)
         log(f"Skipping '{card.title}': no visible 'Mettre aux enchères' button.")
         return False
 
@@ -672,6 +893,12 @@ def launch_auction(page: Page, card: CardRecord, start_price: int, duration_labe
         log(f"Dry run: would auction '{card.title}' at {start_price} for {duration_label}.")
         close_current_dialog_or_detail(page)
         return True
+
+    if not wait_for_auction_form(page):
+        assert_auction_slot_available(page)
+        log(f"Skipping '{card.title}': auction form did not open after clicking 'Mettre aux enchères'.")
+        close_current_dialog_or_detail(page)
+        return False
 
     if fill_starting_bid(page, start_price):
         log(f"Set starting bid to {start_price} for '{card.title}'.")
@@ -682,7 +909,7 @@ def launch_auction(page: Page, card: CardRecord, start_price: int, duration_labe
         raise RuntimeError(f"Could not set auction duration '{duration_label}' for {card.title}.\n" + dump_visible_controls(page))
     log(f"Set duration to {duration_label} for '{card.title}'.")
 
-    if not click_control_with_words(page, ("lancer", "enchere"), timeout_ms=3_000):
+    if not click_auction_form_control_with_words(page, ("lancer", "enchere"), timeout_ms=3_000):
         raise RuntimeError(f"Could not find 'Lancer l'enchère' for {card.title}.\n" + dump_visible_controls(page))
 
     ui_pause(page, 1_500)
@@ -841,7 +1068,13 @@ def run(args: argparse.Namespace) -> int:
 
                     start_price = starting_price_for_card(card, args.start_price, args.non_low_rarity_start_price)
                     log(f"Preparing auction for '{card.title}' ({card.rarity}) at start price {start_price}.")
-                    if launch_auction(page, card, start_price, args.duration, args.apply):
+                    try:
+                        auction_launched = launch_auction(page, card, start_price, args.duration, args.apply)
+                    except AuctionSlotsFullError as exc:
+                        log(f"Stopping auction cycle early: {exc}")
+                        close_current_dialog_or_detail(page)
+                        break
+                    if auction_launched:
                         launched += 1
                     attempted_pass_keys.add(card.key)
                     if args.apply:
