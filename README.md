@@ -14,7 +14,9 @@ All browser scripts use normal authenticated WikiMasters UI interactions. They l
 
 ```text
 .
-├── .github/workflows/open-wikimasters-packs.yml
+├── .github/workflows/
+│   ├── open-wikimasters-packs.yml
+│   └── sell-shitty-cards.yml
 ├── scripts/
 │   ├── env_loader.py
 │   ├── open_packs.py
@@ -65,7 +67,7 @@ Open packs locally:
 python3 scripts/open_packs.py
 ```
 
-The GitHub workflow `.github/workflows/open-wikimasters-packs.yml` runs this script in CI. It is the only workflow in this repo right now; the tagger and seller are local scripts unless you add a workflow later.
+The GitHub workflow `.github/workflows/open-wikimasters-packs.yml` runs this script in CI.
 
 ### Dry Run Tags
 
@@ -167,6 +169,8 @@ even across separate script runs.
 
 Do not run mutating tag and seller commands in parallel. Dry runs are fine, but `--apply` tag runs can change the same filtered collection that the seller is reading.
 
+The GitHub workflow `.github/workflows/sell-shitty-cards.yml` runs this seller flow on the self-hosted WikiMasters runner. It sells currently tagged `à bicrave` cards, applies only the `à bicrave` tag when the visible tagged pool is empty, then sells again. The workflow is manual-only and stops after 24 hours, or earlier if the tagger finds no new `à bicrave` candidates.
+
 ## Tagging Rules
 
 Supported tags:
@@ -257,7 +261,7 @@ Seller options:
 
 ## GitHub Actions And cron-job.org
 
-The existing GitHub workflow only opens packs.
+The GitHub workflows can open packs and run the `à bicrave` seller loop.
 
 Add repository secrets:
 
@@ -270,6 +274,7 @@ Trigger manually:
 
 ```bash
 gh workflow run open-wikimasters-packs.yml --ref main
+gh workflow run sell-shitty-cards.yml --ref main
 ```
 
 cron-job.org can call the workflow dispatch endpoint:
@@ -315,7 +320,7 @@ Run static and unit checks:
 - **No cards found by seller**: run a tagger dry run/apply first, then check the `à bicrave` filter in WikiMasters.
 - **Card disappears while selling**: the seller recollects and skips unavailable cards; rerun after active auctions expire.
 - **UI changed on WikiMasters**: inspect the latest screenshot and metadata under `artifacts/`.
-- **GitHub workflow does not appear**: make sure `.github/workflows/open-wikimasters-packs.yml` is committed and pushed.
+- **GitHub workflow does not appear**: make sure the workflow file under `.github/workflows/` is committed and pushed.
 
 ## Security Notes
 

@@ -1,0 +1,133 @@
+name: Sell Shitty Cards
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wikimasters-sell-shitty-cards
+  cancel-in-progress: false
+
+jobs:
+  sell-shitty-cards:
+    name: Sell shitty cards
+    runs-on: [self-hosted, ubuntu, homelab, repo-wikimaster]
+    timeout-minutes: 1440
+    container:
+      image: mcr.microsoft.com/playwright/python:v1.59.0-noble
+      options: --ipc=host
+    env:
+      ARTIFACT_DIR: artifacts
+      HEADLESS: "1"
+      WIKIMASTERS_EMAIL: ${{ secrets.WIKIMASTERS_EMAIL }}
+      WIKIMASTERS_PASSWORD: ${{ secrets.WIKIMASTERS_PASSWORD }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Python dependencies
+        run: python -m pip install --no-cache-dir -r requirements.txt
+
+      - name: Verify required secrets are configured
+        shell: bash
+        run: |
+          test -n "$WIKIMASTERS_EMAIL"
+          test -n "$WIKIMASTERS_PASSWORD"
+
+      - name: Sell and refill shitty cards
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          deadline=$((SECONDS + 24 * 60 * 60))
+          pass_number=0
+
+          remaining_seconds() {
+            local remaining=$((deadline - SECONDS))
+            if (( remaining < 0 )); then
+              echo 0
+            else
+              echo "$remaining"
+            fi
+          }
+
+          run_before_deadline() {
+            local remaining
+            remaining="$(remaining_seconds)"
+            if (( remaining <= 0 )); then
+              return 124
+            fi
+            timeout --kill-after=30s "${remaining}s" "$@"
+          }
+
+          count_bicrave_candidates() {
+            python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("artifacts/tag_candidates.json")
+          try:
+              payload = json.loads(path.read_text(encoding="utf-8"))
+          except FileNotFoundError:
+              print(0)
+              raise SystemExit
+
+          candidates = payload.get("candidates", {}).get("à bicrave", [])
+          print(len(candidates) if isinstance(candidates, list) else 0)
+          PY
+          }
+
+          handle_timed_command_failure() {
+            local status="$1"
+            local phase="$2"
+            if (( status == 124 || status == 137 || status == 143 )); then
+              echo "Reached the 24h workflow deadline while ${phase}; stopping successfully."
+              exit 0
+            fi
+            exit "$status"
+          }
+
+          while true; do
+            if (( "$(remaining_seconds)" <= 0 )); then
+              echo "Reached the 24h workflow deadline."
+              break
+            fi
+
+            pass_number=$((pass_number + 1))
+            echo "Starting seller pass ${pass_number}; $(remaining_seconds) second(s) remain."
+            if run_before_deadline python scripts/sell_shitty_cards.py --apply; then
+              :
+            else
+              handle_timed_command_failure "$?" "selling cards"
+            fi
+
+            if (( "$(remaining_seconds)" <= 0 )); then
+              echo "Reached the 24h workflow deadline after selling."
+              break
+            fi
+
+            echo "No visible 'à bicrave' cards remain; tagging more candidates."
+            if run_before_deadline python scripts/tag_collection_cards.py --apply --tags "à bicrave" --batch-size 1; then
+              :
+            else
+              handle_timed_command_failure "$?" "tagging cards"
+            fi
+
+            candidate_count="$(count_bicrave_candidates)"
+            echo "Tagger found ${candidate_count} new 'à bicrave' candidate(s)."
+            if (( candidate_count == 0 )); then
+              echo "No new 'à bicrave' candidates are available; stopping."
+              break
+            fi
+          done
+
+      - name: Upload failure artifacts
+        if: failure() && github.event.repository.private
+        uses: actions/upload-artifact@v7
+        with:
+          name: wikimasters-sell-shitty-cards-failure
+          path: artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
