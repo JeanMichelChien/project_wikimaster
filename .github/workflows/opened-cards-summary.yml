@@ -14,7 +14,7 @@ concurrency:
 jobs:
   opened-cards-summary:
     name: Summarize opened cards
-    runs-on: [self-hosted, ubuntu, homelab, repo-wikimaster]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       GITHUB_TOKEN: ${{ github.token }}
