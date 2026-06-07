@@ -39,6 +39,15 @@ RARITY_ORDER = {
     "C": 5,
     "unknown": 99,
 }
+RARITY_EMOJIS = {
+    "L": "\U0001f451",
+    "UR": "\U0001f3c6",
+    "SR": "\U0001f497",
+    "R": "\U0001f49c",
+    "PC": "\U0001f535",
+    "C": "\u26aa",
+    "unknown": "\u2754",
+}
 
 
 @dataclass(frozen=True)
@@ -114,6 +123,11 @@ def normalize_rarity(value: str) -> str:
         return "unknown"
     rarity = match.group(1).upper()
     return "unknown" if rarity == "UNKNOWN" else rarity
+
+
+def display_rarity(rarity: str) -> str:
+    normalized = normalize_rarity(rarity)
+    return f"{RARITY_EMOJIS.get(normalized, RARITY_EMOJIS['unknown'])} {normalized}"
 
 
 def parse_opened_card_line(line: str, fallback_opened_at: datetime | None = None) -> OpenedCard | None:
@@ -235,7 +249,7 @@ def render_summary_markdown(
                 [
                     str(index),
                     markdown_cell(summary.name),
-                    markdown_cell(summary.rarity),
+                    markdown_cell(display_rarity(summary.rarity)),
                     str(summary.count),
                     f"`{format_github_time(summary.latest_opened_at)}`",
                     run_links(summary),

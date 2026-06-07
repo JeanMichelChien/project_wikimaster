@@ -7,6 +7,7 @@ from scripts.daily_card_summary import (
     OpenedCard,
     aggregate_cards,
     cards_in_window,
+    display_rarity,
     markdown_cell,
     normalize_rarity,
     parse_github_time,
@@ -46,6 +47,15 @@ class DailyCardSummaryTests(unittest.TestCase):
         self.assertEqual(normalize_rarity("\U0001f499 PC"), "PC")
         self.assertEqual(normalize_rarity("not a rarity"), "unknown")
 
+    def test_display_rarity_adds_summary_emoji(self) -> None:
+        self.assertEqual(display_rarity("L"), "\U0001f451 L")
+        self.assertEqual(display_rarity("UR"), "\U0001f3c6 UR")
+        self.assertEqual(display_rarity("SR"), "\U0001f497 SR")
+        self.assertEqual(display_rarity("R"), "\U0001f49c R")
+        self.assertEqual(display_rarity("PC"), "\U0001f535 PC")
+        self.assertEqual(display_rarity("C"), "\u26aa C")
+        self.assertEqual(display_rarity("unknown"), "\u2754 unknown")
+
     def test_cards_in_window_filters_to_last_24_hours(self) -> None:
         now = datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc)
         cutoff = now - timedelta(hours=24)
@@ -84,6 +94,15 @@ class DailyCardSummaryTests(unittest.TestCase):
 
         self.assertIn("No cards were opened in the last 24 hours.", markdown)
         self.assertIn("Open-packs workflow runs checked: `2`", markdown)
+
+    def test_render_summary_markdown_displays_rarity_emoji(self) -> None:
+        now = datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc)
+        cutoff = now - timedelta(hours=24)
+        summaries = aggregate_cards([OpenedCard(now, "Ada Lovelace", "UR")])
+
+        markdown = render_summary_markdown(summaries, cutoff=cutoff, now=now, source_run_count=1)
+
+        self.assertIn("| 1 | Ada Lovelace | \U0001f3c6 UR | 1 |", markdown)
 
     def test_parse_github_time_truncates_long_fractional_seconds(self) -> None:
         parsed = parse_github_time("2026-06-07T10:00:01.1234567Z")
