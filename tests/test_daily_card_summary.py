@@ -104,6 +104,22 @@ class DailyCardSummaryTests(unittest.TestCase):
 
         self.assertIn("| 1 | Ada Lovelace | \U0001f3c6 UR | 1 |", markdown)
 
+    def test_render_summary_markdown_omits_seconds_from_display_timestamps(self) -> None:
+        now = datetime(2026, 6, 7, 12, 34, 56, tzinfo=timezone.utc)
+        cutoff = datetime(2026, 6, 6, 12, 34, 12, tzinfo=timezone.utc)
+        summaries = aggregate_cards(
+            [OpenedCard(datetime(2026, 6, 7, 10, 5, 59, tzinfo=timezone.utc), "Ada Lovelace", "UR")]
+        )
+
+        markdown = render_summary_markdown(summaries, cutoff=cutoff, now=now, source_run_count=1)
+
+        self.assertIn("- Window start: `2026-06-06T12:34Z`", markdown)
+        self.assertIn("- Window end: `2026-06-07T12:34Z`", markdown)
+        self.assertIn("| 1 | Ada Lovelace | \U0001f3c6 UR | 1 | `2026-06-07T10:05Z` |", markdown)
+        self.assertNotIn("T12:34:12Z", markdown)
+        self.assertNotIn("T12:34:56Z", markdown)
+        self.assertNotIn("T10:05:59Z", markdown)
+
     def test_parse_github_time_truncates_long_fractional_seconds(self) -> None:
         parsed = parse_github_time("2026-06-07T10:00:01.1234567Z")
 

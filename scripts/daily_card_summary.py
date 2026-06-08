@@ -107,6 +107,10 @@ def format_github_time(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def format_summary_time(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="minutes").replace("+00:00", "Z")
+
+
 def extract_line_timestamp(line: str) -> datetime | None:
     match = ISO_TIME_PATTERN.search(line)
     if not match:
@@ -226,8 +230,8 @@ def render_summary_markdown(
     lines = [
         "## WikiMasters Cards Opened in the Last 24 Hours",
         "",
-        f"- Window start: `{format_github_time(cutoff)}`",
-        f"- Window end: `{format_github_time(now)}`",
+        f"- Window start: `{format_summary_time(cutoff)}`",
+        f"- Window end: `{format_summary_time(now)}`",
         f"- Open-packs workflow runs checked: `{source_run_count}`",
         "",
     ]
@@ -251,7 +255,7 @@ def render_summary_markdown(
                     markdown_cell(summary.name),
                     markdown_cell(display_rarity(summary.rarity)),
                     str(summary.count),
-                    f"`{format_github_time(summary.latest_opened_at)}`",
+                    f"`{format_summary_time(summary.latest_opened_at)}`",
                     run_links(summary),
                 ]
             )
