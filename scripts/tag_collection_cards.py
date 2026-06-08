@@ -220,6 +220,28 @@ PLANT_TAXON_PHRASES = (
     "angiosperme",
     "gymnosperme",
 )
+PLANT_TREE_TAXON_PHRASES = (
+    "arbre",
+    "arbres",
+    "arbuste",
+    "arbustes",
+)
+PLANT_TREE_NON_TAXON_PHRASES = (
+    "arbre binaire",
+    "arbre de correspondances",
+    "arbre de decision",
+    "arbre de noel",
+    "arbre genealogique",
+    "arbre syntaxique",
+)
+PLANT_PRODUCT_PHRASES = (
+    "fruit",
+    "fruits",
+    "fruit alimentaire",
+    "fruit comestible",
+    "baie",
+    "baies",
+)
 SUPPORTING_PLANT_CONTEXT_PHRASES = (
     "agriculture",
     "agricole",
@@ -245,6 +267,10 @@ SUPPORTING_PLANT_CONTEXT_PHRASES = (
     "viticulture",
 )
 PLANT_CATEGORY_SUPPORT_PHRASES = (
+    "arbre",
+    "arbres",
+    "arbuste",
+    "arbustes",
     "plante",
     "plantes",
     "plante a fleurs",
@@ -1103,6 +1129,14 @@ def unique_reason(reasons: Sequence[str], fallback: str) -> str:
     return "; ".join(dict.fromkeys(reasons)) or fallback
 
 
+def plant_tree_taxon_matches(text: str) -> list[str]:
+    """Match tree/wooded-plant wording while excluding common non-botanical tree concepts."""
+
+    if phrase_matches(text, PLANT_TREE_NON_TAXON_PHRASES):
+        return []
+    return phrase_matches(text, PLANT_TREE_TAXON_PHRASES)
+
+
 def classify_plante_card(card: CardRecord, metadata: WikipediaMetadata | None = None) -> TagClassification:
     """Match actual plant taxa, not broad botany or plant-derived topics."""
 
@@ -1119,10 +1153,23 @@ def classify_plante_card(card: CardRecord, metadata: WikipediaMetadata | None = 
     reasons: list[str] = []
 
     visible_taxon = phrase_matches(visible_text, PLANT_TAXON_PHRASES)
+    visible_tree_taxon = plant_tree_taxon_matches(card.subtitle)
+    visible_product = phrase_matches(card.subtitle, PLANT_PRODUCT_PHRASES)
     category_taxon = phrase_matches(category_text, PLANT_TAXON_PHRASES)
     category_support = phrase_matches(category_text, PLANT_CATEGORY_SUPPORT_PHRASES)
+    category_tree_support = plant_tree_taxon_matches(category_text)
     description_taxon = phrase_matches(description_text, PLANT_TAXON_PHRASES)
+    description_tree_taxon = plant_tree_taxon_matches(description_text)
+    description_product = phrase_matches(description_text, PLANT_PRODUCT_PHRASES)
     extract_taxon = phrase_matches(extract_text, PLANT_TAXON_PHRASES)
+    extract_tree_taxon = plant_tree_taxon_matches(extract_text)
+    supported_extract_tree_taxon = bool(
+        extract_tree_taxon and (category_support or category_tree_support or looks_like_latin_taxon(card.title))
+    )
+    extract_product = phrase_matches(extract_text, PLANT_PRODUCT_PHRASES)
+    supported_extract_product = bool(
+        extract_product and (category_support or category_tree_support or looks_like_latin_taxon(card.title))
+    )
     supporting_context = phrase_matches(" ".join([visible_text, description_text, category_text]), SUPPORTING_PLANT_CONTEXT_PHRASES)
     visible_negative = phrase_matches(visible_text, NEGATIVE_CONTEXT_PHRASES)
     metadata_negative = phrase_matches(
@@ -1134,15 +1181,33 @@ def classify_plante_card(card: CardRecord, metadata: WikipediaMetadata | None = 
     if visible_taxon:
         score += 10
         reasons.append(f"visible plant taxon term: {visible_taxon[0]}")
+    if visible_tree_taxon:
+        score += 10
+        reasons.append(f"visible tree taxon term: {visible_tree_taxon[0]}")
+    if visible_product:
+        score += 10
+        reasons.append(f"visible plant product term: {visible_product[0]}")
     if description_taxon:
         score += 8
         reasons.append(f"Wikipedia description plant taxon term: {description_taxon[0]}")
+    if description_tree_taxon:
+        score += 8
+        reasons.append(f"Wikipedia description tree taxon term: {description_tree_taxon[0]}")
+    if description_product:
+        score += 8
+        reasons.append(f"Wikipedia description plant product term: {description_product[0]}")
     if category_taxon:
         score += 6
         reasons.append(f"Wikipedia category plant taxon term: {category_taxon[0]}")
     if extract_taxon:
         score += 2
         reasons.append(f"Wikipedia extract plant taxon term: {extract_taxon[0]}")
+    if supported_extract_tree_taxon:
+        score += 2
+        reasons.append(f"Wikipedia extract tree taxon term: {extract_tree_taxon[0]}")
+    if supported_extract_product:
+        score += 2
+        reasons.append(f"Wikipedia extract plant product term: {extract_product[0]}")
     if category_support and (extract_taxon or looks_like_latin_taxon(card.title)):
         score += 2
         reasons.append(f"Wikipedia category plant support: {category_support[0]}")
@@ -1162,9 +1227,16 @@ def classify_plante_card(card: CardRecord, metadata: WikipediaMetadata | None = 
 
     has_taxon_evidence = bool(
         visible_taxon
+        or visible_tree_taxon
+        or visible_product
         or description_taxon
+        or description_tree_taxon
+        or description_product
         or extract_taxon
+        or supported_extract_tree_taxon
+        or supported_extract_product
         or (category_taxon and looks_like_latin_taxon(card.title))
+        or (category_tree_support and looks_like_latin_taxon(card.title))
     )
     is_match = has_taxon_evidence and score >= 4 and not hard_negative
     reason = unique_reason(reasons, "no plant taxon evidence found")

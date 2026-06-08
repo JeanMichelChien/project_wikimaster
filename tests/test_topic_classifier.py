@@ -152,6 +152,58 @@ class TopicClassifierTests(unittest.TestCase):
         self.assertTrue(classification.is_plant_related)
         self.assertIn("Wikipedia", classification.reason)
 
+    def test_visible_tree_subtitle_is_plant_related(self) -> None:
+        card = make_card("Érable à sucre", "arbre d'Amérique du Nord")
+
+        classification = classify_plant_card(card)
+
+        self.assertTrue(classification.is_plant_related)
+        self.assertIn("visible tree taxon term", classification.reason)
+
+    def test_supported_metadata_tree_extract_is_plant_related(self) -> None:
+        card = make_card("Érable à sucre")
+        metadata = WikipediaMetadata(
+            title="Érable à sucre",
+            description="arbre d'Amérique du Nord",
+            extract="L'Érable à sucre est un arbre de la famille des Sapindaceae.",
+            categories=("Arbre", "Acer"),
+        )
+
+        classification = classify_plant_card(card, metadata)
+
+        self.assertTrue(classification.is_plant_related)
+        self.assertIn("Wikipedia description tree taxon term", classification.reason)
+
+    def test_visible_fruit_subtitle_is_plant_related(self) -> None:
+        card = make_card("Fraise", "fruit du fraisier")
+
+        classification = classify_plant_card(card)
+
+        self.assertTrue(classification.is_plant_related)
+        self.assertIn("visible plant product term", classification.reason)
+
+    def test_visible_plural_fruits_subtitle_is_plant_related(self) -> None:
+        card = make_card("Fruits rouges", "fruits comestibles")
+
+        classification = classify_plant_card(card)
+
+        self.assertTrue(classification.is_plant_related)
+        self.assertIn("visible plant product term", classification.reason)
+
+    def test_metadata_fruit_description_is_plant_related(self) -> None:
+        card = make_card("Fraise")
+        metadata = WikipediaMetadata(
+            title="Fraise",
+            description="fruit du fraisier",
+            extract="La fraise est le fruit des fraisiers, plantes herbacées du genre Fragaria.",
+            categories=("Fruit alimentaire", "Fragaria"),
+        )
+
+        classification = classify_plant_card(card, metadata)
+
+        self.assertTrue(classification.is_plant_related)
+        self.assertIn("Wikipedia description plant product term", classification.reason)
+
     def test_generic_botany_topic_is_not_plant_taxon(self) -> None:
         card = make_card("Photosynthèse")
         metadata = WikipediaMetadata(
