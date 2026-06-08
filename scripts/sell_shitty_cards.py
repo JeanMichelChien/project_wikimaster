@@ -96,7 +96,7 @@ DEFAULT_TAG = "à bicrave"
 DEFAULT_WAIT_SECONDS = 10 * 60 + 10
 DEFAULT_MAX_PER_CYCLE = 5
 DEFAULT_SCAN_LIMIT = 0
-DEFAULT_LOW_RARITY_START_PRICE = 10
+DEFAULT_LOW_RARITY_START_PRICE = 6
 DEFAULT_NON_LOW_RARITY_START_PRICE = 40
 DEFAULT_SELL_STATE_PATH = ARTIFACT_DIR / "sell_auction_state.json"
 NEVER_SELL_RARITIES = {"L"}
@@ -122,7 +122,7 @@ def is_sellable_auction_card(card: CardRecord) -> bool:
 
 
 def starting_price_for_card(card: CardRecord, low_rarity_price: int, non_low_rarity_price: int) -> int:
-    """Use 10 for normal C/PC resale cards and 40 for manually tagged rarities."""
+    """Use the low-rarity price for normal C/PC resale cards and 40 for manually tagged rarities."""
 
     if not is_sellable_auction_card(card):
         raise RuntimeError(f"Refusing to auction protected rarity {card.rarity}: {card.title}")

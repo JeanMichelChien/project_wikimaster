@@ -842,6 +842,10 @@ class BulkTagResult:
         return self.tagged + self.already_tagged
 
 
+class SelectionLostError(RuntimeError):
+    """Raised when the collection UI drops bulk selection before mutation."""
+
+
 @dataclass(frozen=True)
 class CandidateArtifact:
     """Machine-readable candidates saved after a scan for fast later apply."""
@@ -2598,6 +2602,20 @@ def read_selected_count(page: Page) -> int | None:
         return None
 
 
+def selected_count_is_at_least(page: Page, expected_count: int, timeout_ms: int = 1_000) -> tuple[bool, int | None]:
+    """Return whether the bulk-selection count is visible and high enough."""
+
+    deadline = time.monotonic() + timeout_ms / 1_000
+    last_count = read_selected_count(page)
+    while True:
+        if last_count is not None and last_count >= expected_count:
+            return True, last_count
+        if time.monotonic() >= deadline:
+            return False, last_count
+        ui_pause(page, 150)
+        last_count = read_selected_count(page)
+
+
 def wait_for_selected_count_increase(page: Page, previous_count: int, timeout_ms: int = 2_000) -> int | None:
     """Poll until the WikiMasters toolbar confirms one more selected card."""
 
@@ -2605,7 +2623,11 @@ def wait_for_selected_count_increase(page: Page, previous_count: int, timeout_ms
     last_count = read_selected_count(page)
     while time.monotonic() < deadline:
         if last_count is not None and last_count > previous_count:
-            return last_count
+            is_stable, stable_count = selected_count_is_at_least(page, last_count, timeout_ms=350)
+            if is_stable:
+                return stable_count
+            last_count = stable_count
+            continue
         ui_pause(page, 150)
         last_count = read_selected_count(page)
     return last_count if last_count is not None and last_count > previous_count else None
@@ -2719,7 +2741,23 @@ def dump_visible_controls(page: Page) -> str:
 def click_bulk_tag_menu(page: Page) -> None:
     """Open the bulk etiquette action using visible text/labels."""
 
-    point = page.evaluate(
+    button_pattern = re.compile(r"^étiqueter$|^etiqueter$|ajouter.*étiquette|ajouter.*etiquette|add.*tag", re.IGNORECASE)
+    button = get_first_visible(
+        [
+            page.get_by_role("button", name=button_pattern),
+        ],
+        timeout_ms=800,
+    )
+    if button is not None:
+        try:
+            if button.is_enabled(timeout=500):
+                button.click(timeout=3_000)
+                ui_pause(page, 600)
+                return
+        except PlaywrightError:
+            pass
+
+    action = page.evaluate(
         """
         () => {
           const normalize = (value) =>
@@ -2733,10 +2771,7 @@ def click_bulk_tag_menu(page: Page) -> None:
           for (const element of document.querySelectorAll('button, [role="button"], a')) {
             const rect = element.getBoundingClientRect();
             const style = window.getComputedStyle(element);
-            if (style.visibility === 'hidden' || style.display === 'none' || rect.width < 24 || rect.height < 24) {
-              continue;
-            }
-            if (element.disabled || element.getAttribute('aria-disabled') === 'true' || element.hasAttribute('disabled')) {
+            if (style.visibility === 'hidden' || style.display === 'none' || rect.width === 0 || rect.height === 0) {
               continue;
             }
             const text = normalize([
@@ -2746,18 +2781,31 @@ def click_bulk_tag_menu(page: Page) -> None:
             ].filter(Boolean).join(' '));
             if (!/(etiquet|tag)/.test(text)) continue;
             if (/toutes les etiquettes|filtre/.test(text)) continue;
+            const disabled =
+              element.disabled ||
+              element.getAttribute('aria-disabled') === 'true' ||
+              element.hasAttribute('disabled') ||
+              style.pointerEvents === 'none';
             const score =
               (/etiqueter|ajouter|add/.test(text) ? 1000 : 0) +
               (/etiquet|tag/.test(text) ? 200 : 0) -
               rect.top;
-            candidates.push({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, score, text });
+            candidates.push({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, score, text, disabled });
           }
           candidates.sort((a, b) => b.score - a.score);
-          return candidates[0] || null;
+          const enabled = candidates.find((candidate) => !candidate.disabled);
+          return { enabled: enabled || null, disabledCount: candidates.filter((candidate) => candidate.disabled).length };
         }
         """
     )
+    point = action.get("enabled") if isinstance(action, dict) else None
     if not point:
+        selected_count = read_selected_count(page)
+        disabled_count = int(action.get("disabledCount", 0)) if isinstance(action, dict) else 0
+        if disabled_count and (selected_count is None or selected_count <= 0):
+            raise SelectionLostError(
+                "Bulk étiquette action is visible but disabled because no cards are selected."
+            )
         raise RuntimeError("Could not find a bulk étiquette action.\n" + dump_visible_controls(page))
     page.mouse.click(point["x"], point["y"])
     ui_pause(page, 600)
@@ -2927,8 +2975,16 @@ def click_bulk_result_close(page: Page) -> None:
         pass
 
 
-def add_tag_to_selected(page: Page, target_tag: str) -> BulkTagResult | None:
+def add_tag_to_selected(page: Page, target_tag: str, expected_count: int = 1) -> BulkTagResult | None:
     """Use the open bulk UI to add one etiquette to selected cards."""
+
+    selected_enough, selected_count = selected_count_is_at_least(page, expected_count, timeout_ms=500)
+    if not selected_enough:
+        count_hint = "unknown" if selected_count is None else str(selected_count)
+        raise SelectionLostError(
+            f"Expected at least {expected_count} selected card(s) before tagging '{target_tag}', "
+            f"but the UI shows {count_hint}."
+        )
 
     click_bulk_tag_menu(page)
     click_tag_option_or_fill(page, target_tag)
@@ -3219,12 +3275,13 @@ def apply_single_card_by_search(
         except RuntimeError as page_error:
             raise RuntimeError(f"{search_error}; page fallback also failed: {page_error}") from page_error
 
-    actual_selected_count = read_selected_count(page)
-    if actual_selected_count is not None and actual_selected_count < 1:
-        raise RuntimeError(f"Expected 1 selected card before tagging '{target_tag}', but the UI shows {actual_selected_count}.")
+    selected_enough, actual_selected_count = selected_count_is_at_least(page, 1, timeout_ms=1_000)
+    if not selected_enough:
+        count_hint = "unknown" if actual_selected_count is None else str(actual_selected_count)
+        raise SelectionLostError(f"Expected 1 selected card before tagging '{target_tag}', but the UI shows {count_hint}.")
 
     ui_pause(page, batch_delay_ms)
-    bulk_result = add_tag_to_selected(page, target_tag)
+    bulk_result = add_tag_to_selected(page, target_tag, expected_count=1)
     ui_pause(page, batch_delay_ms)
     if bulk_result is None or bulk_result.successful_count < 1:
         verify_batch_tags(page, [card], target_tag, selection_delay_ms)
@@ -3314,15 +3371,49 @@ def apply_tag_batches(
                 log(f"Applied '{target_tag}' to {len(applied)}/{len(cards)} candidate card(s).")
             continue
 
-        actual_selected_count = read_selected_count(page)
-        if actual_selected_count is not None and actual_selected_count < len(batch):
-            raise RuntimeError(
+        selected_enough, actual_selected_count = selected_count_is_at_least(page, len(batch), timeout_ms=1_000)
+        if not selected_enough:
+            if len(batch) == 1:
+                count_hint = "unknown" if actual_selected_count is None else str(actual_selected_count)
+                log(
+                    f"Selection count for '{batch[0].title}' dropped to {count_hint}; "
+                    "retrying the card via search."
+                )
+                apply_single_card_by_search(
+                    page,
+                    batch[0],
+                    target_tag,
+                    selection_delay_ms,
+                    batch_delay_ms,
+                    confirmed_tags_path,
+                )
+                applied.append(batch[0])
+                log(f"Applied '{target_tag}' to {len(applied)}/{len(cards)} candidate card(s).")
+                continue
+            count_hint = "unknown" if actual_selected_count is None else str(actual_selected_count)
+            raise SelectionLostError(
                 f"Expected at least {len(batch)} selected card(s) before tagging '{target_tag}', "
-                f"but the UI shows {actual_selected_count}."
+                f"but the UI shows {count_hint}."
             )
 
         ui_pause(page, batch_delay_ms)
-        bulk_result = add_tag_to_selected(page, target_tag)
+        try:
+            bulk_result = add_tag_to_selected(page, target_tag, expected_count=len(batch))
+        except SelectionLostError as exc:
+            if len(batch) != 1:
+                raise
+            log(f"Selection was lost before bulk tagging '{batch[0].title}': {exc} Retrying via search.")
+            apply_single_card_by_search(
+                page,
+                batch[0],
+                target_tag,
+                selection_delay_ms,
+                batch_delay_ms,
+                confirmed_tags_path,
+            )
+            applied.append(batch[0])
+            log(f"Applied '{target_tag}' to {len(applied)}/{len(cards)} candidate card(s).")
+            continue
         ui_pause(page, batch_delay_ms)
         if bulk_result is None or bulk_result.successful_count < len(batch):
             verify_batch_tags(page, batch, target_tag, selection_delay_ms)

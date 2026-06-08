@@ -36,7 +36,9 @@ from scripts.tag_collection_cards import (
     parse_tags_arg,
     record_confirmed_tags,
     search_queries_for_card,
+    selected_count_is_at_least,
     validate_apply_candidates_for_tag,
+    wait_for_selected_count_increase,
     write_candidate_artifact,
 )
 
@@ -50,6 +52,27 @@ def make_card(title: str, subtitle: str = "", tags: tuple[str, ...] = (), rarity
         tags=tags,
         visible_text="\n".join([rarity, title, subtitle, *tags]),
     )
+
+
+class FakeSelectionPage:
+    def __init__(self, body_texts: list[str]) -> None:
+        self.body_texts = body_texts
+        self.index = 0
+        self.waits: list[int] = []
+
+    def locator(self, selector: str) -> "FakeSelectionPage":
+        if selector != "body":
+            raise AssertionError(f"Unexpected selector: {selector}")
+        return self
+
+    def inner_text(self, timeout: int = 1_000) -> str:
+        _ = timeout
+        text = self.body_texts[min(self.index, len(self.body_texts) - 1)]
+        self.index += 1
+        return text
+
+    def wait_for_timeout(self, timeout_ms: int) -> None:
+        self.waits.append(timeout_ms)
 
 
 class TopicClassifierTests(unittest.TestCase):
@@ -356,7 +379,24 @@ class TopicClassifierTests(unittest.TestCase):
     def test_parse_selected_count_text(self) -> None:
         self.assertEqual(parse_selected_count_text("0 carte sélectionnée"), 0)
         self.assertEqual(parse_selected_count_text("2 cartes sélectionnées"), 2)
+        self.assertEqual(parse_selected_count_text("0 carte sélectionnée\nÉtiqueter"), 0)
         self.assertIsNone(parse_selected_count_text("Étiqueter"))
+
+    def test_selected_count_is_at_least_waits_for_visible_toolbar_count(self) -> None:
+        page = FakeSelectionPage(["0 carte sélectionnée", "1 carte sélectionnée"])
+
+        self.assertEqual(selected_count_is_at_least(page, 1, timeout_ms=50), (True, 1))
+
+    def test_wait_for_selected_count_increase_rejects_transient_selection(self) -> None:
+        page = FakeSelectionPage(
+            [
+                "0 carte sélectionnée",
+                "1 carte sélectionnée",
+                "0 carte sélectionnée",
+            ]
+        )
+
+        self.assertIsNone(wait_for_selected_count_increase(page, 0, timeout_ms=5))
 
     def test_search_queries_for_card_tries_short_normalized_title_variants(self) -> None:
         queries = search_queries_for_card(make_card("Nick Carter, le roi des détectives"))
