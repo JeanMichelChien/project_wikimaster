@@ -1,0 +1,64 @@
+name: Tag Collection Cards
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_apply_candidates:
+        description: Maximum candidate cards to tag per enabled tag. Use 0 for all.
+        required: true
+        default: "0"
+      max_cards:
+        description: Maximum collection cards to scan before applying. Use 0 for all.
+        required: true
+        default: "0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wikimasters-tag-collection-cards
+  cancel-in-progress: false
+
+jobs:
+  tag-collection-cards:
+    name: Tag collection cards
+    runs-on: [self-hosted, ubuntu, homelab, repo-wikimaster]
+    timeout-minutes: 1440
+    container:
+      image: mcr.microsoft.com/playwright/python:v1.59.0-noble
+      options: --ipc=host
+    env:
+      ARTIFACT_DIR: artifacts
+      HEADLESS: "1"
+      WIKIMASTERS_EMAIL: ${{ secrets.WIKIMASTERS_EMAIL }}
+      WIKIMASTERS_PASSWORD: ${{ secrets.WIKIMASTERS_PASSWORD }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Python dependencies
+        run: python -m pip install --no-cache-dir -r requirements.txt
+
+      - name: Verify required secrets are configured
+        shell: bash
+        run: |
+          test -n "$WIKIMASTERS_EMAIL"
+          test -n "$WIKIMASTERS_PASSWORD"
+
+      - name: Tag collection cards
+        run: >
+          python scripts/tag_collection_cards.py
+          --apply
+          --exclude-tags "à bicrave"
+          --batch-size 1
+          --max-apply-candidates "${{ inputs.max_apply_candidates }}"
+          --max-cards "${{ inputs.max_cards }}"
+
+      - name: Upload failure artifacts
+        if: failure() && github.event.repository.private
+        uses: actions/upload-artifact@v7
+        with:
+          name: wikimasters-tag-collection-cards-failure
+          path: artifacts/
+          if-no-files-found: ignore
+          retention-days: 7

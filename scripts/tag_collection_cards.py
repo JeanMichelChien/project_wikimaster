@@ -65,9 +65,128 @@ RARITY_PATTERN = re.compile(r"^(L|UR|SR|R|PC|C)$", re.IGNORECASE)
 PAGE_COUNTER_PATTERN = re.compile(r"Page\s+(\d+)\s*/\s*(\d+)", re.IGNORECASE)
 SUPPORTED_TAGS = ("plante", "philo", "scam", "train", "rivière", "souterrains", "à bicrave")
 DEFAULT_TAGS = ",".join(SUPPORTED_TAGS)
+RARITY_EMOJIS = {
+    "L": "\U0001f451",
+    "UR": "\U0001f3c6",
+    "SR": "\U0001f497",
+    "R": "\U0001f49c",
+    "PC": "\U0001f535",
+    "C": "\u26aa",
+    "unknown": "\u2754",
+}
 
 # Phrase lists are intentionally conservative: each classifier needs central
 # article evidence plus tag-specific exclusions to avoid broad keyword matches.
+CATEGORY_IGNORED_PREFIXES = (
+    "article ",
+    "articles ",
+    "bon article",
+    "categorie commons",
+    "date de ",
+    "deces ",
+    "infobox ",
+    "naissance ",
+    "page ",
+    "portail ",
+    "projet ",
+    "wikipedia ",
+)
+CATEGORY_IGNORED_FRAGMENTS = (
+    " articles lies",
+    " article lie",
+    " avec notice d'autorite",
+    " contenant un appel a traduction",
+    " contenant un lien mort",
+    " utilisant une infobox",
+    " a illustrer",
+    " ebauche ",
+)
+COMMON_MEDIA_NEGATIVE_PHRASES = (
+    "film",
+    "serie televisee",
+    "roman",
+    "livre",
+    "chanson",
+    "album",
+    "jeu video",
+    "peinture",
+    "tableau",
+    "gravure",
+    "bande dessinee",
+    "personnage",
+)
+COMMON_LIST_EVENT_NEGATIVE_PHRASES = (
+    "page de liste",
+    "liste",
+    "chronologie",
+    "evenement",
+    "ceremonie",
+    "prix",
+    "festival",
+    "accident",
+    "catastrophe",
+    "bataille",
+    "guerre",
+)
+COMMON_ADMIN_PLACE_NEGATIVE_PHRASES = (
+    "commune",
+    "ville",
+    "village",
+    "localite",
+    "municipalite",
+    "departement",
+    "region",
+    "province",
+    "district",
+    "canton",
+    "arrondissement",
+    "comte",
+    "pays",
+    "territoire",
+)
+COMMON_STREET_ROUTE_NEGATIVE_PHRASES = (
+    "rue",
+    "voie a",
+    "voie urbaine",
+    "voie publique",
+    "route",
+    "avenue",
+    "boulevard",
+    "chemin",
+    "impasse",
+    "place publique",
+)
+COMMON_PERSON_NEGATIVE_PHRASES = (
+    "acteur",
+    "actrice",
+    "ecrivain",
+    "ecrivaine",
+    "homme politique",
+    "femme politique",
+    "roi",
+    "reine",
+    "pape",
+    "poete",
+    "poetesse",
+)
+COMMON_ORGANIZATION_NEGATIVE_PHRASES = (
+    "entreprise",
+    "societe",
+    "compagnie",
+    "corp",
+    "corporation",
+    "organisation",
+)
+COMMON_TRANSPORT_LINE_NEGATIVE_PHRASES = (
+    "gare",
+    "station",
+    "ligne ferroviaire",
+    "ligne de chemin de fer",
+    "ligne de metro",
+    "ligne de trolleybus",
+    "ligne de bus",
+    "voie ferree",
+)
 PLANT_TAXON_PHRASES = (
     "genre de plantes",
     "genre de plante",
@@ -174,25 +293,13 @@ PLANT_HARD_NEGATIVE_PHRASES = (
     "page de liste",
 )
 NEGATIVE_CONTEXT_PHRASES = (
-    "film",
-    "acteur",
-    "actrice",
-    "ecrivain",
-    "ecrivaine",
-    "roman",
-    "livre",
-    "chanson",
-    "album",
+    *COMMON_MEDIA_NEGATIVE_PHRASES,
+    *COMMON_PERSON_NEGATIVE_PHRASES,
+    *COMMON_ADMIN_PLACE_NEGATIVE_PHRASES,
+    *COMMON_ORGANIZATION_NEGATIVE_PHRASES,
     "groupe de rock",
-    "homme politique",
-    "femme politique",
-    "commune",
-    "ville",
-    "district",
     "barrage",
     "election",
-    "roi",
-    "reine",
     "football",
     "hockey",
     "joueur de hockey",
@@ -204,20 +311,10 @@ NEGATIVE_CONTEXT_PHRASES = (
     "syndrome",
     "champignon",
     "souche",
-    "entreprise",
-    "societe",
     "langue",
-    "pays",
-    "village",
-    "hameau",
-    "municipalite",
-    "localite",
     "census-designated place",
-    "guerre",
-    "bataille",
     "page d'homonymie",
     "homonymie",
-    "page de liste",
 )
 
 PHILO_CORE_PHRASES = (
@@ -264,22 +361,14 @@ PHILO_CATEGORY_PHRASES = (
     "ontologie",
 )
 PHILO_NEGATIVE_PHRASES = (
-    "acteur",
-    "actrice",
+    *COMMON_MEDIA_NEGATIVE_PHRASES,
+    *COMMON_PERSON_NEGATIVE_PHRASES,
+    *COMMON_ADMIN_PLACE_NEGATIVE_PHRASES,
+    *COMMON_LIST_EVENT_NEGATIVE_PHRASES,
     "chanteur",
     "chanteuse",
     "footballeur",
     "football",
-    "homme politique",
-    "femme politique",
-    "roi",
-    "reine",
-    "commune",
-    "ville",
-    "film",
-    "serie televisee",
-    "chanson",
-    "album",
     "groupe de musique",
 )
 PHILO_NONCENTRAL_BIO_PHRASES = (
@@ -295,17 +384,14 @@ PHILO_NONCENTRAL_BIO_PHRASES = (
     "ecrivaine",
 )
 PHILO_HARD_NEGATIVE_PHRASES = (
-    "acteur",
-    "actrice",
+    *COMMON_MEDIA_NEGATIVE_PHRASES,
     "chanteur",
     "chanteuse",
     "footballeur",
     "football",
-    "film",
-    "serie televisee",
-    "chanson",
-    "album",
     "groupe de musique",
+    "liste d'evenements",
+    "chronologie",
 )
 
 SCAM_STRONG_PHRASES = (
@@ -343,12 +429,7 @@ SCAM_CATEGORY_PHRASES = (
     "affaire financiere",
 )
 SCAM_NEGATIVE_PHRASES = (
-    "film",
-    "serie televisee",
-    "roman",
-    "chanson",
-    "album",
-    "jeu video",
+    *COMMON_MEDIA_NEGATIVE_PHRASES,
     "meurtre",
     "assassinat",
     "guerre",
@@ -358,12 +439,7 @@ SCAM_NEGATIVE_PHRASES = (
     "volcan",
 )
 SCAM_MEDIA_NEGATIVE_PHRASES = (
-    "film",
-    "serie televisee",
-    "roman",
-    "chanson",
-    "album",
-    "jeu video",
+    *COMMON_MEDIA_NEGATIVE_PHRASES,
 )
 
 TRAIN_OBJECT_PHRASES = (
@@ -402,27 +478,20 @@ TRAIN_CATEGORY_PHRASES = (
     "shinkansen",
 )
 TRAIN_NEGATIVE_PHRASES = (
-    "gare",
-    "station",
-    "ligne ferroviaire",
-    "ligne de chemin de fer",
-    "voie ferree",
+    *COMMON_MEDIA_NEGATIVE_PHRASES,
+    *COMMON_TRANSPORT_LINE_NEGATIVE_PHRASES,
+    *COMMON_ORGANIZATION_NEGATIVE_PHRASES,
     "reseau ferroviaire",
     "compagnie ferroviaire",
     "entreprise ferroviaire",
     "societe ferroviaire",
     "accident ferroviaire",
     "catastrophe ferroviaire",
-    "film",
-    "peinture",
-    "tableau",
-    "chanson",
-    "album",
-    "roman",
-    "jeu video",
-    "personnage",
-    "acteur",
-    "actrice",
+    "convoi de deportes",
+    "deportation",
+    "deportes",
+    "resistants",
+    "occupation allemande",
 )
 
 UNDERGROUND_STRUCTURE_PHRASES = (
@@ -473,41 +542,28 @@ UNDERGROUND_CATEGORY_PHRASES = (
     "cavite",
 )
 UNDERGROUND_NEGATIVE_PHRASES = (
-    "film",
-    "serie televisee",
-    "roman",
-    "chanson",
-    "album",
+    *COMMON_MEDIA_NEGATIVE_PHRASES,
+    *COMMON_ADMIN_PLACE_NEGATIVE_PHRASES,
+    *COMMON_PERSON_NEGATIVE_PHRASES,
+    *COMMON_ORGANIZATION_NEGATIVE_PHRASES,
+    *COMMON_TRANSPORT_LINE_NEGATIVE_PHRASES,
     "groupe de musique",
-    "gravure",
-    "peinture",
-    "tableau",
     "musique underground",
     "culture underground",
     "presse underground",
     "bande dessinee underground",
     "mouvement underground",
-    "gare",
-    "station",
-    "district",
-    "village",
-    "commune",
-    "ligne de metro",
-    "ligne ferroviaire",
     "operation de secours",
     "sauvetage",
-    "accident",
-    "catastrophe",
-    "evenement",
     "edit",
     "loi",
     "decret",
-    "ecrivain",
-    "ecrivaine",
-    "acteur",
-    "actrice",
-    "homme politique",
-    "femme politique",
+    "geologue",
+    "speleologue",
+    "ingenieur du corps des mines",
+    "inhume",
+    "inhumee",
+    "trolleybus",
 )
 
 RIVER_WATERCOURSE_PHRASES = (
@@ -522,6 +578,12 @@ RIVER_WATERCOURSE_PHRASES = (
     "wadi",
     "fleuve côtier",
     "rivière endoréique",
+    "canal",
+    "zone humide",
+    "marais",
+    "marécage",
+    "tourbière",
+    "site Ramsar",
 )
 RIVER_CATEGORY_PHRASES = (
     "rivière",
@@ -531,28 +593,23 @@ RIVER_CATEGORY_PHRASES = (
     "ruisseau",
     "torrent",
     "oued",
+    "canal",
+    "zone humide",
+    "marais",
+    "marécage",
+    "tourbière",
+    "site Ramsar",
 )
 RIVER_HARD_NEGATIVE_PHRASES = (
-    "commune",
-    "ville",
-    "village",
-    "localite",
-    "municipalite",
-    "departement",
-    "region",
-    "province",
-    "district",
-    "canton",
-    "arrondissement",
-    "comte",
-    "pays",
-    "territoire",
+    *COMMON_MEDIA_NEGATIVE_PHRASES,
+    *COMMON_LIST_EVENT_NEGATIVE_PHRASES,
+    *COMMON_ADMIN_PLACE_NEGATIVE_PHRASES,
+    *COMMON_STREET_ROUTE_NEGATIVE_PHRASES,
+    *COMMON_PERSON_NEGATIVE_PHRASES,
+    *COMMON_TRANSPORT_LINE_NEGATIVE_PHRASES,
     "parc national",
-    "gare",
-    "station",
     "pont",
     "barrage",
-    "canal",
     "aqueduc",
     "lac",
     "mer",
@@ -565,6 +622,8 @@ RIVER_HARD_NEGATIVE_PHRASES = (
     "cascade",
     "chute d'eau",
     "glacier",
+    "cirque naturel",
+    "cirque geographique",
     "vallee",
     "montagne",
     "colline",
@@ -572,50 +631,26 @@ RIVER_HARD_NEGATIVE_PHRASES = (
     "bassin hydrographique",
     "delta",
     "estuaire",
-    "film",
-    "serie televisee",
-    "roman",
-    "chanson",
-    "album",
-    "jeu video",
-    "peinture",
-    "tableau",
-    "personnage",
-    "acteur",
-    "actrice",
-    "ecrivain",
-    "ecrivaine",
-    "homme politique",
-    "femme politique",
-    "bataille",
-    "guerre",
-    "catastrophe",
-    "accident",
+    "inondation",
+    "crue",
     "page d'homonymie",
     "homonymie",
-    "page de liste",
-    "liste",
 )
 RIVER_CATEGORY_NEGATIVE_PHRASES = (
-    "commune",
-    "ville",
-    "village",
-    "departement",
-    "district",
-    "gare",
-    "station",
+    *COMMON_ADMIN_PLACE_NEGATIVE_PHRASES,
+    *COMMON_STREET_ROUTE_NEGATIVE_PHRASES,
+    *COMMON_MEDIA_NEGATIVE_PHRASES,
+    *COMMON_LIST_EVENT_NEGATIVE_PHRASES,
+    *COMMON_TRANSPORT_LINE_NEGATIVE_PHRASES,
     "pont",
     "barrage",
-    "canal",
     "lac",
     "cascade",
-    "film",
-    "roman",
-    "chanson",
-    "album",
-    "bataille",
+    "chute d'eau",
+    "cirque",
+    "inondation",
+    "crue",
     "homonymie",
-    "liste",
 )
 
 BICRAVE_LOW_RARITIES = {"C", "PC"}
@@ -905,6 +940,31 @@ def phrase_matches(text: str, phrases: Sequence[str]) -> list[str]:
     return matches
 
 
+def is_topical_wikipedia_category(category: str) -> bool:
+    """Ignore Wikipedia maintenance/navigation categories for topic classifiers."""
+
+    normalized = normalize_text(category).replace(":", " ")
+    if not normalized:
+        return False
+    if any(normalized.startswith(prefix) for prefix in CATEGORY_IGNORED_PREFIXES):
+        return False
+    return not any(fragment in normalized for fragment in CATEGORY_IGNORED_FRAGMENTS)
+
+
+def filtered_category_text(metadata: WikipediaMetadata | None) -> str:
+    if not metadata or metadata.missing:
+        return ""
+    return " ".join(category for category in metadata.categories if is_topical_wikipedia_category(category))
+
+
+def metadata_topic_text(metadata: WikipediaMetadata | None) -> tuple[str, str, str]:
+    """Return metadata text for strict topic tags, with non-topical categories removed."""
+
+    if not metadata or metadata.missing:
+        return "", "", ""
+    return metadata.description, metadata.extract, filtered_category_text(metadata)
+
+
 def looks_like_latin_taxon(value: str) -> bool:
     """Detect binomial-ish Latin taxon names without catching French titles."""
 
@@ -925,6 +985,10 @@ def has_tag(card: CardRecord, target_tag: str) -> bool:
     return any(normalized_tag(tag) == wanted for tag in card.tags)
 
 
+def has_any_tag(card: CardRecord) -> bool:
+    return bool(card.tags)
+
+
 def has_target_tag(card: CardRecord, target_tag: str) -> bool:
     wanted = normalized_tag(target_tag)
     visible_lines = [normalized_tag(line) for line in card.visible_text.splitlines()]
@@ -933,6 +997,14 @@ def has_target_tag(card: CardRecord, target_tag: str) -> bool:
 
 def validate_apply_candidates_for_tag(cards: Sequence[CardRecord], target_tag: str) -> None:
     """Abort before UI mutation if saved candidates violate hard tag invariants."""
+
+    already_tagged = [card for card in cards if has_any_tag(card)]
+    if already_tagged:
+        details = ", ".join(f"{card.title} ({', '.join(card.tags)})" for card in already_tagged[:10])
+        raise RuntimeError(
+            "Tags can only be applied to cards with no existing tags. "
+            f"Refusing {len(already_tagged)} already-tagged candidate(s): {details}"
+        )
 
     if normalized_tag(target_tag) != normalized_tag("à bicrave"):
         return
@@ -1039,7 +1111,7 @@ def classify_plante_card(card: CardRecord, metadata: WikipediaMetadata | None = 
     description_text = ""
     extract_text = ""
     if metadata and not metadata.missing:
-        category_text = " ".join(metadata.categories)
+        category_text = filtered_category_text(metadata)
         description_text = metadata.description
         extract_text = metadata.extract
 
@@ -1107,7 +1179,7 @@ def classify_philo_card(card: CardRecord, metadata: WikipediaMetadata | None = N
     """Match core philosophy people, concepts, schools, works, and institutions."""
 
     visible_text = visible_topic_text(card)
-    description_text, extract_text, category_text = metadata_text(metadata)
+    description_text, extract_text, category_text = metadata_topic_text(metadata)
     metadata_primary_text = " ".join([description_text, category_text])
     score = 0
     reasons: list[str] = []
@@ -1139,12 +1211,16 @@ def classify_philo_card(card: CardRecord, metadata: WikipediaMetadata | None = N
         score -= 6
         reasons.append(f"category-only philosophy on non-central biography: {noncentral_bio[0]}")
 
-    if re.fullmatch(r"\d{3,4} en philosophie", normalize_text(card.title)):
+    chronology_page = bool(
+        re.fullmatch(r"\d{3,4} en philosophie", normalize_text(card.title))
+        or phrase_matches(" ".join([visible_text, description_text]), ("liste d'événements",))
+    )
+    if chronology_page:
         score -= 8
         reasons.append("chronology page rather than core philosophy topic")
 
-    primary_evidence = bool(visible_core or description_core or category_core)
-    is_match = primary_evidence and score >= 6 and not hard_negative
+    primary_evidence = bool(visible_core or description_core or (category_core and extract_core))
+    is_match = primary_evidence and score >= 6 and not hard_negative and not chronology_page
     return TagClassification(
         tag="philo",
         is_match=is_match,
@@ -1157,7 +1233,7 @@ def classify_scam_card(card: CardRecord, metadata: WikipediaMetadata | None = No
     """Match articles where fraud, scams, or Ponzi-style schemes are central."""
 
     visible_text = visible_topic_text(card)
-    description_text, extract_text, category_text = metadata_text(metadata)
+    description_text, extract_text, category_text = metadata_topic_text(metadata)
     primary_text = " ".join([visible_text, description_text, category_text])
     score = 0
     reasons: list[str] = []
@@ -1201,7 +1277,7 @@ def classify_train_card(card: CardRecord, metadata: WikipediaMetadata | None = N
     """Match train objects only, excluding stations, media, companies, and events."""
 
     visible_text = visible_topic_text(card)
-    description_text, extract_text, category_text = metadata_text(metadata)
+    description_text, extract_text, category_text = metadata_topic_text(metadata)
     primary_text = " ".join([visible_text, description_text, category_text])
     score = 0
     reasons: list[str] = []
@@ -1244,7 +1320,7 @@ def classify_souterrains_card(card: CardRecord, metadata: WikipediaMetadata | No
     """Match underground structures/places, excluding cultural or metaphorical uses."""
 
     visible_text = visible_topic_text(card)
-    description_text, extract_text, category_text = metadata_text(metadata)
+    description_text, extract_text, category_text = metadata_topic_text(metadata)
     primary_text = " ".join([visible_text, description_text, category_text])
     score = 0
     reasons: list[str] = []
@@ -1276,7 +1352,7 @@ def classify_souterrains_card(card: CardRecord, metadata: WikipediaMetadata | No
         score -= 10
         reasons.append(f"excluded non-place underground context: {negative[0]}")
 
-    primary_evidence = bool(visible_structure or description_structure or category_structure)
+    primary_evidence = bool(visible_structure or description_structure or (category_structure and extract_structure))
     is_match = primary_evidence and score >= 6 and not negative
     return TagClassification(
         tag="souterrains",
@@ -1287,10 +1363,10 @@ def classify_souterrains_card(card: CardRecord, metadata: WikipediaMetadata | No
 
 
 def classify_riviere_card(card: CardRecord, metadata: WikipediaMetadata | None = None) -> TagClassification:
-    """Match rivers and natural watercourses, excluding places or works named after rivers."""
+    """Match watercourses, canals, and wetlands, excluding adjacent or named-after topics."""
 
     visible_text = f"{card.subtitle} {' '.join(card.tags)}"
-    description_text, extract_text, category_text = metadata_text(metadata)
+    description_text, extract_text, category_text = metadata_topic_text(metadata)
     negative_primary_text = " ".join([card.title, card.subtitle, description_text])
     score = 0
     reasons: list[str] = []
@@ -1326,13 +1402,13 @@ def classify_riviere_card(card: CardRecord, metadata: WikipediaMetadata | None =
         score -= 8
         reasons.append(f"excluded non-river category: {category_negative[0]}")
 
-    primary_evidence = bool(visible_watercourse or description_watercourse or category_watercourse)
+    primary_evidence = bool(visible_watercourse or description_watercourse or (category_watercourse and extract_watercourse))
     is_match = primary_evidence and score >= 6 and not hard_negative and not category_negative
     return TagClassification(
         tag="rivière",
         is_match=is_match,
         score=score,
-        reason=unique_reason(reasons, "no river/watercourse evidence found"),
+        reason=unique_reason(reasons, "no watercourse/canal/wetland evidence found"),
     )
 
 
@@ -1406,7 +1482,7 @@ TAG_DEFINITIONS: dict[str, TagDefinition] = {
     "philo": TagDefinition("philo", "core philosophy people, schools, concepts, works, and institutions", classify_philo_card),
     "scam": TagDefinition("scam", "central scams, fraud cases, Ponzi schemes, fraudsters, and fraudulent organizations", classify_scam_card),
     "train": TagDefinition("train", "train objects only, including trains, locomotives, rolling stock, types, classes, and models", classify_train_card),
-    "rivière": TagDefinition("rivière", "rivers and natural watercourses only", classify_riviere_card),
+    "rivière": TagDefinition("rivière", "watercourses, canals, and wetlands only", classify_riviere_card),
     "souterrains": TagDefinition("souterrains", "underground structures and places only", classify_souterrains_card),
     "à bicrave": TagDefinition(
         "à bicrave",
@@ -1426,7 +1502,7 @@ def classify_card_for_tag(tag: str, card: CardRecord, metadata: WikipediaMetadat
     return definition.classifier(card, metadata)
 
 
-def parse_tags_arg(value: str) -> tuple[str, ...]:
+def parse_tag_list_arg(value: str, option_name: str) -> tuple[str, ...]:
     """Parse a comma-separated tag list and reject unsupported tags early."""
 
     canonical_by_normalized = {normalize_text(tag): tag for tag in TAG_DEFINITIONS}
@@ -1438,13 +1514,47 @@ def parse_tags_arg(value: str) -> tuple[str, ...]:
         )
     )
     if not requested:
-        raise ValueError("--tags cannot be empty.")
+        raise ValueError(f"{option_name} cannot be empty.")
 
     unsupported = [tag for tag in requested if tag not in TAG_DEFINITIONS]
     if unsupported:
         supported = ", ".join(SUPPORTED_TAGS)
         raise ValueError(f"Unsupported tag(s): {', '.join(unsupported)}. Supported tags: {supported}.")
     return requested
+
+
+def parse_tags_arg(value: str) -> tuple[str, ...]:
+    """Parse the inclusive tag CLI option."""
+
+    return parse_tag_list_arg(value, "--tags")
+
+
+def parse_exclude_tags_arg(value: str) -> tuple[str, ...]:
+    """Parse the excluded tag CLI option."""
+
+    return parse_tag_list_arg(value, "--exclude-tags")
+
+
+def resolve_enabled_tags(
+    tags_arg: str | None,
+    target_tag_arg: str | None,
+    exclude_tags_arg: str | None = None,
+) -> tuple[str, ...]:
+    """Resolve selected tags, then remove any requested exclusions."""
+
+    if tags_arg and target_tag_arg:
+        raise ValueError("Use either --tags or the legacy --target-tag option, not both.")
+
+    selected_tags = parse_tags_arg(target_tag_arg if target_tag_arg else (tags_arg or DEFAULT_TAGS))
+    excluded_tags = parse_exclude_tags_arg(exclude_tags_arg) if exclude_tags_arg is not None else ()
+    if not excluded_tags:
+        return selected_tags
+
+    excluded = set(excluded_tags)
+    enabled_tags = tuple(tag for tag in selected_tags if tag not in excluded)
+    if not enabled_tags:
+        raise ValueError("No tags remain after --exclude-tags.")
+    return enabled_tags
 
 
 def parse_bulk_tag_result_text(text: str) -> BulkTagResult | None:
@@ -1604,15 +1714,18 @@ def build_candidates_by_tag(
     classifications: dict[str, dict[str, TagClassification]],
     tags: Sequence[str],
 ) -> dict[str, list[CardRecord]]:
-    return {
-        tag: [
-            card
-            for card in cards
-            if not has_target_tag(card, tag)
-            and classifications.get(tag, {}).get(card.key, TagClassification(tag, False, 0, "")).is_match
-        ]
-        for tag in tags
-    }
+    candidates_by_tag: dict[str, list[CardRecord]] = {tag: [] for tag in tags}
+    assigned_card_keys: set[str] = set()
+    for tag in tags:
+        for card in cards:
+            if has_any_tag(card) or card.key in assigned_card_keys:
+                continue
+            classification = classifications.get(tag, {}).get(card.key, TagClassification(tag, False, 0, ""))
+            if not classification.is_match:
+                continue
+            candidates_by_tag[tag].append(card)
+            assigned_card_keys.add(card.key)
+    return candidates_by_tag
 
 
 def build_invalid_existing_by_tag(
@@ -1723,6 +1836,57 @@ def load_candidate_artifact(path: Path, requested_tags: Sequence[str] | None = N
 def markdown_cell(value: object) -> str:
     text = "" if value is None else str(value)
     return text.replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ").strip()
+
+
+def display_rarity(rarity: str) -> str:
+    normalized = rarity.upper() if RARITY_PATTERN.fullmatch(rarity or "") else "unknown"
+    return f"{RARITY_EMOJIS.get(normalized, RARITY_EMOJIS['unknown'])} {normalized}"
+
+
+def render_tagged_cards_summary(applied: dict[str, Sequence[CardRecord]], tags: Sequence[str]) -> list[str]:
+    """Render the GitHub Actions summary for non-bicrave cards tagged in this run."""
+
+    bicrave_tag = normalized_tag("à bicrave")
+    applied_by_tag = {
+        tag: list(applied.get(tag, ()))
+        for tag in tags
+        if normalized_tag(tag) != bicrave_tag and applied.get(tag)
+    }
+    total_applied = sum(len(cards) for cards in applied_by_tag.values())
+    lines = [
+        "# WikiMasters Tagged Cards",
+        "",
+        f"- Non-`à bicrave` card/tag additions applied this run: {total_applied}",
+        "",
+    ]
+    if not total_applied:
+        lines.append("No non-`à bicrave` cards were tagged in this run.")
+        return lines
+
+    for tag, cards in applied_by_tag.items():
+        lines.extend(
+            [
+                f"## `{tag}`",
+                "",
+                "| Card | Rarity |",
+                "|---|---:|",
+            ]
+        )
+        for card in cards:
+            lines.append(f"| {markdown_cell(card.title)} | {markdown_cell(display_rarity(card.rarity))} |")
+        lines.append("")
+    return lines
+
+
+def write_github_tagged_summary(applied: dict[str, Sequence[CardRecord]], tags: Sequence[str]) -> None:
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary_path:
+        return
+    try:
+        with Path(summary_path).open("a", encoding="utf-8") as summary_file:
+            summary_file.write("\n".join(render_tagged_cards_summary(applied, tags)) + "\n")
+    except OSError as exc:
+        log(f"Could not write GitHub step summary: {exc}")
 
 
 def get_first_visible(candidates: Iterable[Locator], timeout_ms: int = 1_500) -> Locator | None:
@@ -3090,6 +3254,65 @@ def card_tag_status_by_search(page: Page, card: CardRecord, target_tag: str, del
             stagnant_rounds = 0
 
 
+def current_card_by_search(page: Page, card: CardRecord, delay_ms: int) -> CardRecord | None:
+    """Search current collection state for one saved card candidate."""
+
+    page.goto(COLLECTION_URL, wait_until="domcontentloaded")
+    settle_page(page)
+    for query in search_queries_for_card(card):
+        filter_collection(page, query, delay_ms)
+        reset_collection_scroll(page)
+        ui_pause(page, delay_ms)
+        stagnant_rounds = 0
+
+        while True:
+            for visible_card in extract_visible_cards(page):
+                if same_card_identity(visible_card, card):
+                    return visible_card
+
+            metrics = read_collection_scroll_metrics(page)
+            if metrics["atBottom"] and stagnant_rounds >= 2:
+                break
+
+            previous_scroll_top = metrics["scrollTop"]
+            metrics = scroll_collection(page)
+            ui_pause(page, delay_ms)
+            if metrics["scrollTop"] == previous_scroll_top:
+                stagnant_rounds += 1
+            else:
+                stagnant_rounds = 0
+
+    return None
+
+
+def filter_current_tagless_candidates(
+    page: Page,
+    candidates: Sequence[CardRecord],
+    target_tag: str,
+    delay_ms: int,
+) -> list[CardRecord]:
+    """Keep saved candidates whose current visible collection card still has no tags."""
+
+    tagless: list[CardRecord] = []
+    skipped_tagged = 0
+    skipped_missing = 0
+    for card in candidates:
+        current_card = current_card_by_search(page, card, delay_ms)
+        if current_card is None:
+            skipped_missing += 1
+            continue
+        if has_any_tag(current_card):
+            skipped_tagged += 1
+            continue
+        tagless.append(card)
+
+    if skipped_tagged:
+        log(f"Skipping {skipped_tagged} saved '{target_tag}' candidate card(s) that now have tags.")
+    if skipped_missing:
+        log(f"Skipping {skipped_missing} saved '{target_tag}' candidate card(s) that could not be found for current-state validation.")
+    return tagless
+
+
 def verify_batch_tags_removed(page: Page, batch: Sequence[CardRecord], target_tag: str, delay_ms: int) -> None:
     """Search each card after removal and confirm the target tag is gone."""
 
@@ -3461,6 +3684,7 @@ def write_report(
     invalid_existing: dict[str, Sequence[CardRecord]] | None = None,
     removed: dict[str, Sequence[CardRecord]] | None = None,
     sample_per_tag: int = 10,
+    write_summary: bool = True,
 ) -> None:
     """Write a grouped Markdown report for dry-run review or apply results."""
 
@@ -3597,13 +3821,8 @@ def write_report(
 
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary_path:
-        try:
-            with Path(summary_path).open("a", encoding="utf-8") as summary_file:
-                summary_file.write("\n".join(lines[: 12 + len(tags)]) + "\n")
-        except OSError as exc:
-            log(f"Could not write GitHub step summary: {exc}")
+    if write_summary:
+        write_github_tagged_summary(applied, tags)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -3627,6 +3846,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--tags",
         default=None,
         help=f"Comma-separated tags to classify. Defaults to all supported tags: {DEFAULT_TAGS}.",
+    )
+    parser.add_argument(
+        "--exclude-tags",
+        default=None,
+        help="Comma-separated supported tags to exclude from the enabled tag set.",
     )
     parser.add_argument("--target-tag", default=None, help=argparse.SUPPRESS)
     parser.add_argument(
@@ -3677,18 +3901,12 @@ def run(args: argparse.Namespace) -> int:
     email = required_env("WIKIMASTERS_EMAIL")
     password = required_env("WIKIMASTERS_PASSWORD")
     headless = os.environ.get("HEADLESS", "1").lower() not in {"0", "false", "no"}
-    if args.tags and args.target_tag:
-        raise RuntimeError("Use either --tags or the legacy --target-tag option, not both.")
     if args.remove_invalid_existing and not (args.tags or args.target_tag):
         raise RuntimeError("--remove-invalid-existing requires an explicit --tags value.")
-    if args.apply_candidates and not args.tags and not args.target_tag:
-        enabled_tags: tuple[str, ...] = ()
-    else:
-        tags_arg = args.target_tag if args.target_tag else (args.tags or DEFAULT_TAGS)
-        try:
-            enabled_tags = parse_tags_arg(tags_arg)
-        except ValueError as exc:
-            raise RuntimeError(str(exc)) from exc
+    try:
+        enabled_tags = resolve_enabled_tags(args.tags, args.target_tag, args.exclude_tags)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
     if args.batch_size < 1:
         raise RuntimeError("--batch-size must be at least 1.")
     if args.max_apply_candidates < 0:
@@ -3732,8 +3950,21 @@ def run(args: argparse.Namespace) -> int:
                     f"Loaded saved candidates from {args.candidate_path} "
                     f"({candidate_artifact.cards_scanned} cards scanned at {candidate_artifact.generated_at or 'unknown time'})."
                 )
+                already_applied_card_keys: set[str] = set()
                 for tag in enabled_tags:
-                    candidates = candidate_artifact.cards_by_tag[tag]
+                    saved_candidates = candidate_artifact.cards_by_tag[tag]
+                    skipped_tagged = [card for card in saved_candidates if has_any_tag(card)]
+                    candidates = [
+                        card
+                        for card in saved_candidates
+                        if not has_any_tag(card) and card.key not in already_applied_card_keys
+                    ]
+                    skipped_already_applied_count = len(saved_candidates) - len(skipped_tagged) - len(candidates)
+                    if skipped_tagged:
+                        log(f"Skipping {len(skipped_tagged)} saved '{tag}' candidate card(s) that already have tags.")
+                    if skipped_already_applied_count:
+                        log(f"Skipping {skipped_already_applied_count} saved '{tag}' candidate card(s) already tagged earlier in this run.")
+                    candidates = filter_current_tagless_candidates(page, candidates, tag, args.selection_delay_ms)
                     if args.max_apply_candidates:
                         candidates = candidates[: args.max_apply_candidates]
                     if not candidates:
@@ -3749,7 +3980,9 @@ def run(args: argparse.Namespace) -> int:
                         args.batch_delay_ms,
                         args.confirmed_tags_path,
                     )
+                    already_applied_card_keys.update(card.key for card in applied[tag])
                 total_applied = sum(len(tag_cards) for tag_cards in applied.values())
+                write_github_tagged_summary(applied, enabled_tags)
                 log(f"Run completed successfully. Applied {total_applied} saved candidate card/tag addition(s).")
                 return 0
 
@@ -3761,7 +3994,7 @@ def run(args: argparse.Namespace) -> int:
             cards_needing_any_enabled_tag_check = [
                 card
                 for card in cards
-                if any(not has_target_tag(card, tag) or (audit_existing and has_target_tag(card, tag)) for tag in enabled_tags)
+                if not has_any_tag(card) or (audit_existing and any(has_target_tag(card, tag) for tag in enabled_tags))
             ]
             log(
                 f"Found {len(cards)} scanned card(s); {len(cards_needing_any_enabled_tag_check)} "
@@ -3770,24 +4003,24 @@ def run(args: argparse.Namespace) -> int:
 
             wikipedia = WikipediaClient(args.cache_path, args.wikipedia_delay_ms, args.wikipedia_batch_size)
             metadata_by_title = wikipedia.fetch_many([card.title for card in cards_needing_any_enabled_tag_check])
-            candidates_by_tag: dict[str, list[CardRecord]] = {}
+            tagless_cards = [card for card in cards if not has_any_tag(card)]
             for tag in enabled_tags:
-                untagged_cards = [card for card in cards if not has_target_tag(card, tag)]
                 tagged_cards = [card for card in cards if has_target_tag(card, tag)]
-                cards_to_classify = untagged_cards + (tagged_cards if audit_existing else [])
+                cards_to_classify = tagless_cards + (tagged_cards if audit_existing else [])
                 classifications[tag] = {
                     card.key: classify_card_for_tag(tag, card, metadata_by_title.get(card.title))
                     for card in cards_to_classify
                 }
-                candidates_by_tag[tag] = [
-                    card for card in untagged_cards if classifications[tag][card.key].is_match
-                ]
                 invalid_existing[tag] = [
                     card for card in tagged_cards if not classifications.get(tag, {}).get(card.key, TagClassification(tag, False, 0, "")).is_match
                 ] if audit_existing else []
+
+            candidates_by_tag = build_candidates_by_tag(cards, classifications, enabled_tags)
+            for tag in enabled_tags:
+                tagged_cards = [card for card in cards if has_target_tag(card, tag)]
                 log(
                     f"Found {len(candidates_by_tag[tag])} untagged '{tag}' candidate card(s); "
-                    f"{len(cards) - len(untagged_cards)} already tagged."
+                    f"{len(tagged_cards)} already tagged."
                 )
                 if audit_existing:
                     log(f"Found {len(invalid_existing[tag])} invalid existing '{tag}' tag(s).")
@@ -3803,6 +4036,7 @@ def run(args: argparse.Namespace) -> int:
                 dry_run=dry_run,
                 invalid_existing=invalid_existing if audit_existing else None,
                 sample_per_tag=args.sample_per_tag,
+                write_summary=dry_run or (not total_candidates and not args.remove_invalid_existing),
             )
             log(f"Wrote report to {args.report_path}.")
 
@@ -3837,6 +4071,7 @@ def run(args: argparse.Namespace) -> int:
                     invalid_existing=invalid_existing,
                     removed=removed,
                     sample_per_tag=args.sample_per_tag,
+                    write_summary=False,
                 )
                 total_removed = sum(len(tag_cards) for tag_cards in removed.values())
                 log(f"Run completed successfully. Removed {total_removed} invalid existing card/tag assignment(s).")

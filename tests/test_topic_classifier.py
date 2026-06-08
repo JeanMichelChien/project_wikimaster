@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.env_loader import load_env_file
 from scripts.sell_shitty_cards import (
@@ -21,9 +22,12 @@ from scripts.tag_collection_cards import (
     TagClassification,
     WikipediaMetadata,
     apply_confirmed_tags,
+    build_candidates_by_tag,
     build_invalid_existing_by_tag,
     classify_card_for_tag,
     classify_plant_card,
+    display_rarity,
+    filter_current_tagless_candidates,
     forget_confirmed_tags,
     has_tag,
     iter_page_batches,
@@ -35,6 +39,8 @@ from scripts.tag_collection_cards import (
     parse_selected_count_text,
     parse_tags_arg,
     record_confirmed_tags,
+    render_tagged_cards_summary,
+    resolve_enabled_tags,
     search_queries_for_card,
     selected_count_is_at_least,
     validate_apply_candidates_for_tag,
@@ -312,6 +318,34 @@ class TopicClassifierTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_tags_arg("plante,inconnu")
 
+    def test_display_rarity_adds_summary_emoji(self) -> None:
+        self.assertEqual(display_rarity("L"), "\U0001f451 L")
+        self.assertEqual(display_rarity("UR"), "\U0001f3c6 UR")
+        self.assertEqual(display_rarity("SR"), "\U0001f497 SR")
+        self.assertEqual(display_rarity("R"), "\U0001f49c R")
+        self.assertEqual(display_rarity("PC"), "\U0001f535 PC")
+        self.assertEqual(display_rarity("C"), "\u26aa C")
+        self.assertEqual(display_rarity("not a rarity"), "\u2754 unknown")
+
+    def test_resolve_enabled_tags_defaults_to_all_except_excluded_tag(self) -> None:
+        self.assertEqual(
+            resolve_enabled_tags(None, None, "à bicrave"),
+            ("plante", "philo", "scam", "train", "rivière", "souterrains"),
+        )
+
+    def test_resolve_enabled_tags_normalizes_excluded_tag(self) -> None:
+        self.assertEqual(
+            resolve_enabled_tags(None, None, "a bicrave"),
+            ("plante", "philo", "scam", "train", "rivière", "souterrains"),
+        )
+
+    def test_resolve_enabled_tags_applies_include_list_then_exclusion(self) -> None:
+        self.assertEqual(resolve_enabled_tags("plante,philo,scam", None, "philo"), ("plante", "scam"))
+
+    def test_resolve_enabled_tags_rejects_empty_selection_after_exclusion(self) -> None:
+        with self.assertRaisesRegex(ValueError, "No tags remain"):
+            resolve_enabled_tags("plante", None, "plante")
+
     def test_iter_page_batches_does_not_span_collection_pages(self) -> None:
         cards = [
             make_card("A"),
@@ -428,6 +462,84 @@ class TopicClassifierTests(unittest.TestCase):
         self.assertEqual(loaded.cards_by_tag["plante"][0].page_total, 42)
         self.assertEqual(loaded.classifications["plante"][candidate.key].score, 10)
 
+    def test_candidate_artifact_excludes_cards_with_any_existing_tag(self) -> None:
+        candidate = make_card("Socrate", "philosophe grec")
+        already_tagged = make_card("Diogene", "philosophe grec", tags=("plante",))
+        classifications = {
+            "philo": {
+                candidate.key: TagClassification("philo", True, 8, "visible philosophy term"),
+                already_tagged.key: TagClassification("philo", True, 8, "visible philosophy term"),
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "tag_candidates.json"
+            write_candidate_artifact(path, [candidate, already_tagged], classifications, ("philo",))
+            loaded = load_candidate_artifact(path)
+
+        self.assertEqual([card.title for card in loaded.cards_by_tag["philo"]], ["Socrate"])
+
+    def test_candidate_builder_assigns_card_to_first_matching_tag_only(self) -> None:
+        card = make_card("Socrate", "philosophe grec")
+        classifications = {
+            "philo": {card.key: TagClassification("philo", True, 8, "visible philosophy term")},
+            "scam": {card.key: TagClassification("scam", True, 8, "test overlap")},
+        }
+
+        candidates = build_candidates_by_tag([card], classifications, ("philo", "scam"))
+
+        self.assertEqual([candidate.title for candidate in candidates["philo"]], ["Socrate"])
+        self.assertEqual(candidates["scam"], [])
+
+    def test_validate_apply_candidates_rejects_already_tagged_cards(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "no existing tags"):
+            validate_apply_candidates_for_tag([make_card("Socrate", "philosophe grec", tags=("plante",))], "philo")
+
+    def test_saved_candidates_are_filtered_against_current_tag_state(self) -> None:
+        first = make_card("First", "philosophe grec")
+        second = make_card("Second", "philosophe grec")
+        missing = make_card("Missing", "philosophe grec")
+        current_cards = {
+            first.title: make_card("First", "philosophe grec", tags=("plante",)),
+            second.title: make_card("Second", "philosophe grec"),
+            missing.title: None,
+        }
+
+        def fake_lookup(page: object, card: CardRecord, delay_ms: int) -> CardRecord | None:
+            _ = page, delay_ms
+            return current_cards[card.title]
+
+        with patch("scripts.tag_collection_cards.current_card_by_search", side_effect=fake_lookup):
+            filtered = filter_current_tagless_candidates(object(), [first, second, missing], "philo", 0)
+
+        self.assertEqual([card.title for card in filtered], ["Second"])
+
+    def test_tagged_cards_summary_groups_non_bicrave_cards_by_tag(self) -> None:
+        lines = render_tagged_cards_summary(
+            {
+                "plante": [make_card("Ancolie", "genre de plantes", rarity="UR")],
+                "à bicrave": [make_card("Cheap Town", "commune francaise", rarity="C")],
+                "philo": [make_card("Socrate", "philosophe grec", rarity="R")],
+            },
+            ("plante", "à bicrave", "philo"),
+        )
+        markdown = "\n".join(lines)
+
+        self.assertIn("## `plante`", markdown)
+        self.assertIn("| Ancolie | \U0001f3c6 UR |", markdown)
+        self.assertIn("## `philo`", markdown)
+        self.assertIn("| Socrate | \U0001f49c R |", markdown)
+        self.assertNotIn("Cheap Town", markdown)
+        self.assertNotIn("## `à bicrave`", markdown)
+
+    def test_tagged_cards_summary_reports_no_non_bicrave_cards(self) -> None:
+        lines = render_tagged_cards_summary(
+            {"à bicrave": [make_card("Cheap Town", "commune francaise", rarity="C")]},
+            ("à bicrave",),
+        )
+
+        self.assertIn("No non-`à bicrave` cards were tagged in this run.", "\n".join(lines))
+
     def test_load_candidate_artifact_filters_requested_tags(self) -> None:
         card = make_card("Socrate", "philosophe grec")
         classifications = {
@@ -527,6 +639,20 @@ class TopicClassifierTests(unittest.TestCase):
         self.assert_tag_miss("philo", friendship, friendship_metadata)
         self.assert_tag_miss("philo", researcher, researcher_metadata)
 
+    def test_philo_excludes_chronology_pages(self) -> None:
+        chronology = make_card(
+            "1550 en philosophie",
+            "liste d'événements survenus en 1550 dans le domaine de la philosophie",
+        )
+        chronology_metadata = WikipediaMetadata(
+            title="1550 en philosophie",
+            description="liste d'événements survenus en 1550 dans le domaine de la philosophie",
+            extract="L'année 1550 a été marquée, en philosophie, par les événements suivants.",
+            categories=("1550 en philosophie", "Portail:Philosophie/Articles liés"),
+        )
+
+        self.assert_tag_miss("philo", chronology, chronology_metadata)
+
     def test_scam_matches_fraud_and_ponzi(self) -> None:
         madoff = make_card("Bernard Madoff", "financier americain")
         madoff_metadata = WikipediaMetadata(
@@ -591,6 +717,17 @@ class TopicClassifierTests(unittest.TestCase):
 
         self.assert_tag_miss("train", regularity, regularity_metadata)
 
+    def test_train_excludes_historical_convoys(self) -> None:
+        train_de_loos = make_card("Train de Loos", "convoi de déportés")
+        train_de_loos_metadata = WikipediaMetadata(
+            title="Train de Loos",
+            description="convoi de déportés",
+            extract="Le Train de Loos est un convoi de déportés affrété en 1944.",
+            categories=("Convoi de la déportation des Juifs de France", "Portail:Chemin de fer/Articles liés"),
+        )
+
+        self.assert_tag_miss("train", train_de_loos, train_de_loos_metadata)
+
     def test_souterrains_matches_underground_places_and_structures(self) -> None:
         cave = make_card("Grotte Chauvet", "grotte ornee paleolithique")
         cave_metadata = WikipediaMetadata(
@@ -625,6 +762,38 @@ class TopicClassifierTests(unittest.TestCase):
         self.assert_tag_miss("souterrains", engraving)
         self.assert_tag_miss("souterrains", writer)
 
+    def test_souterrains_excludes_incidental_category_matches(self) -> None:
+        pope = make_card("Jean XIX", "144e pape de l'Eglise catholique, de 1024 a 1032")
+        pope_metadata = WikipediaMetadata(
+            title="Jean XIX",
+            description="144e pape de l'Eglise catholique, de 1024 a 1032",
+            categories=("Personnalité inhumée dans les grottes vaticanes",),
+        )
+        geologist = make_card("Louis de Launay", "geologue, poete, philosophe et economiste francais")
+        geologist_metadata = WikipediaMetadata(
+            title="Louis de Launay",
+            description="geologue, poete, philosophe et economiste francais",
+            categories=("Ingenieur du corps des mines",),
+        )
+        company = make_card("Geovic Mining Corp")
+        company_metadata = WikipediaMetadata(
+            title="Geovic Mining Corp",
+            extract="Geovic Mining Corp est une entreprise minière basée a Denver.",
+            categories=("Entreprise minière ayant son siège aux États-Unis", "Portail:Mine/Articles liés"),
+        )
+        trolleybus = make_card("Trolleybus du tunnel de Tateyama", "ligne de trolleybus de la prefecture de Toyama")
+        trolleybus_metadata = WikipediaMetadata(
+            title="Trolleybus du tunnel de Tateyama",
+            description="ligne de trolleybus de la prefecture de Toyama",
+            extract="Le trolleybus du tunnel de Tateyama était une ligne de trolleybus entièrement souterraine.",
+            categories=("Trolleybus au Japon",),
+        )
+
+        self.assert_tag_miss("souterrains", pope, pope_metadata)
+        self.assert_tag_miss("souterrains", geologist, geologist_metadata)
+        self.assert_tag_miss("souterrains", company, company_metadata)
+        self.assert_tag_miss("souterrains", trolleybus, trolleybus_metadata)
+
     def test_riviere_matches_rivers_and_watercourses(self) -> None:
         seine = make_card("Seine", "fleuve francais")
         seine_metadata = WikipediaMetadata(
@@ -639,10 +808,26 @@ class TopicClassifierTests(unittest.TestCase):
             categories=("Cours d'eau en France", "Affluent de la Loire"),
         )
         ruisseau = make_card("Ruisseau du Moulin", "ruisseau francais")
+        canal = make_card("Canal du Midi", "canal francais")
+        canal_metadata = WikipediaMetadata(
+            title="Canal du Midi",
+            description="canal francais",
+            extract="Le canal est une voie navigable et un cours d'eau artificiel.",
+            categories=("Canal en France",),
+        )
+        wetland = make_card("Garaa Sejnane", "zone humide en Tunisie")
+        wetland_metadata = WikipediaMetadata(
+            title="Garaa Sejnane",
+            description="zone humide en Tunisie",
+            extract="La Garaa Sejnane est une zone humide bordant l'oued Sejnane.",
+            categories=("Site Ramsar en Tunisie", "Zone humide"),
+        )
 
         self.assert_tag_match("rivière", seine, seine_metadata)
         self.assert_tag_match("rivière", allier, allier_metadata)
         self.assert_tag_match("rivière", ruisseau)
+        self.assert_tag_match("rivière", canal, canal_metadata)
+        self.assert_tag_match("rivière", wetland, wetland_metadata)
 
     def test_riviere_excludes_named_places_media_and_other_water_features(self) -> None:
         city = make_card("Riviere-du-Loup", "ville du Quebec")
@@ -652,21 +837,39 @@ class TopicClassifierTests(unittest.TestCase):
             categories=("Ville au Quebec",),
         )
         bridge = make_card("Pont de la riviere Kwai", "film britannique")
-        canal = make_card("Canal du Midi", "canal francais")
-        canal_metadata = WikipediaMetadata(
-            title="Canal du Midi",
-            description="canal francais",
-            extract="Le canal est un cours d'eau artificiel.",
-            categories=("Canal en France",),
-        )
         lake = make_card("Lac Victoria", "lac africain")
         homonymy = make_card("Riviere Rouge", "page d'homonymie")
 
         self.assert_tag_miss("rivière", city, city_metadata)
         self.assert_tag_miss("rivière", bridge)
-        self.assert_tag_miss("rivière", canal, canal_metadata)
         self.assert_tag_miss("rivière", lake)
         self.assert_tag_miss("rivière", homonymy)
+
+    def test_riviere_excludes_roads_events_and_landforms_near_water(self) -> None:
+        street = make_card("Rue de Luc", "rue de Bayonne, en France")
+        street_metadata = WikipediaMetadata(
+            title="Rue de Luc",
+            description="rue de Bayonne, en France",
+            extract="La rue de Luc est une voie bayonnaise.",
+            categories=("Voie à Bayonne", "Portail:Route/Articles liés"),
+        )
+        landform = make_card("L'Entonnoir", "cirque naturel de France")
+        landform_metadata = WikipediaMetadata(
+            title="L'Entonnoir",
+            description="cirque naturel de France",
+            extract="Il est situé sur le cours supérieur de la rivière Saint-Denis et comporte plusieurs cascades.",
+            categories=("Chute d'eau dans le parc national de La Réunion", "Portail:Lacs et cours d'eau/Articles liés"),
+        )
+        flood = make_card("Inondation du 7 juin 1904 de Mamers")
+        flood_metadata = WikipediaMetadata(
+            title="Inondation du 7 juin 1904 de Mamers",
+            extract="L'inondation est causée par une crue éclair de la Dive, un affluent de l'Orne saosnoise.",
+            categories=("Inondation en France", "Portail:Lacs et cours d'eau/Articles liés"),
+        )
+
+        self.assert_tag_miss("rivière", street, street_metadata)
+        self.assert_tag_miss("rivière", landform, landform_metadata)
+        self.assert_tag_miss("rivière", flood, flood_metadata)
 
     def test_a_bicrave_matches_only_low_rarity_untagged_resale_topics(self) -> None:
         village = make_card("Saint-Cierge-la-Serre", "commune francaise", rarity="C")
