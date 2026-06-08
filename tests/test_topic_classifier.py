@@ -748,7 +748,7 @@ class TopicClassifierTests(unittest.TestCase):
         self.assertTrue(detail_text_has_tag("Etiquettes\nà bicrave\nMettre aux enchères", "à bicrave"))
         self.assertFalse(detail_text_has_tag("Khabib Nurmagomedov\nUR\nMettre aux enchères", "à bicrave"))
 
-    def test_seller_prefers_cards_not_attempted_in_current_pass(self) -> None:
+    def test_seller_prefers_cards_not_attempted_in_current_visible_pool_pass(self) -> None:
         first = make_card("First", rarity="C")
         second = make_card("Second", rarity="PC")
         attempted_pass_keys = {first.key}
@@ -759,7 +759,7 @@ class TopicClassifierTests(unittest.TestCase):
         self.assertFalse(restarted)
         self.assertEqual(attempted_pass_keys, {first.key})
 
-    def test_seller_restarts_retry_pass_after_all_visible_cards_were_attempted(self) -> None:
+    def test_seller_restarts_visible_pool_pass_after_all_visible_cards_were_attempted(self) -> None:
         first = make_card("First", rarity="C")
         second = make_card("Second", rarity="PC")
         attempted_pass_keys = {first.key, second.key}

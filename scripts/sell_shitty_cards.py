@@ -4,8 +4,9 @@
 The script filters the collection to the `à bicrave` etiquette, opens up to
 five matching cards per cycle, and uses the normal WikiMasters auction UI.
 It is dry-run by default; pass `--apply` to actually launch auctions. Cards
-keep the etiquette after an unsold auction and are retried only after the
-visible tagged pool has had one attempt in the persisted retry pass.
+can leave the etiquette pool after auction resolution, including unsold
+auctions, so the retry state only prevents relaunching a still-visible card
+before WikiMasters has refreshed its tag state.
 """
 
 from __future__ import annotations
@@ -130,7 +131,7 @@ def starting_price_for_card(card: CardRecord, low_rarity_price: int, non_low_rar
 
 
 def load_attempted_pass_keys(path: Path, target_tag: str) -> set[str]:
-    """Load the current auction retry pass so one-shot runs rotate fairly."""
+    """Load the current visible-pool pass so one-shot runs rotate fairly."""
 
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -149,7 +150,7 @@ def load_attempted_pass_keys(path: Path, target_tag: str) -> set[str]:
 
 
 def save_attempted_pass_keys(path: Path, target_tag: str, attempted_pass_keys: set[str]) -> None:
-    """Persist the current retry pass without touching the cards or their tags."""
+    """Persist the current visible-pool pass without touching cards or tags."""
 
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -183,9 +184,9 @@ def choose_next_auction_card(
 ) -> tuple[CardRecord | None, bool]:
     """Pick the next tagged card while giving every visible candidate one attempt per pass.
 
-    Unsold cards keep their `à bicrave` tag on WikiMasters, and they become
-    eligible again after every other visible tagged card has been attempted once
-    in the current persisted retry pass.
+    WikiMasters may remove the `à bicrave` tag after auction resolution,
+    including unsold auctions. This persisted pass is only a local guard
+    against relaunching cards that are still visible before that state change.
     """
 
     visible_keys = {card.key for card in candidates}
@@ -968,7 +969,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--state-path",
         type=Path,
         default=DEFAULT_SELL_STATE_PATH,
-        help="JSON file used to remember which tagged cards were already attempted in the current retry pass.",
+        help="JSON file used to remember which tagged cards were already attempted in the current visible-pool pass.",
     )
     return parser
 
@@ -1043,8 +1044,8 @@ def run(args: argparse.Namespace) -> int:
                     )
                     if restarted_pass:
                         log(
-                            f"All visible '{args.tag}' card(s) have had one auction attempt in the current retry pass; "
-                            "starting a new retry pass."
+                            f"All visible '{args.tag}' card(s) have had one auction attempt in the current visible-pool pass; "
+                            "starting a new visible-pool pass."
                         )
                     if args.apply and attempted_pass_keys != previous_attempted_pass_keys:
                         save_attempted_pass_keys(args.state_path, args.tag, attempted_pass_keys)
