@@ -254,10 +254,135 @@ def login_if_needed(page: Page, email: str, password: str) -> None:
     log("Login completed.")
 
 
+def click_known_dialog_close_by_geometry(page: Page) -> bool:
+    """Close the current contest/promo dialog when it has no accessible label."""
+
+    coords = page.evaluate(
+        """
+        () => {
+          const keywords = /concours de collections|nouveau concours|composez une collection/i;
+          const candidates = [...document.querySelectorAll('[role="dialog"], [aria-modal="true"], div')]
+            .map((element) => {
+              const rect = element.getBoundingClientRect();
+              const style = window.getComputedStyle(element);
+              const text = (element.innerText || '').trim();
+
+              if (
+                !keywords.test(text) ||
+                style.visibility === 'hidden' ||
+                style.display === 'none' ||
+                rect.width < 240 ||
+                rect.height < 160 ||
+                rect.width > window.innerWidth * 0.90 ||
+                rect.height > window.innerHeight * 0.90
+              ) {
+                return null;
+              }
+
+              const centerPenalty =
+                Math.abs(rect.left + rect.width / 2 - window.innerWidth / 2) +
+                Math.abs(rect.top + rect.height / 2 - window.innerHeight / 2);
+              return { element, rect, score: text.length - centerPenalty };
+            })
+            .filter(Boolean)
+            .sort((a, b) => b.score - a.score);
+
+          const dialog = candidates[0];
+          if (!dialog) return null;
+
+          const controls = [...dialog.element.querySelectorAll('button, [role="button"], a')]
+            .map((element) => {
+              const rect = element.getBoundingClientRect();
+              const style = window.getComputedStyle(element);
+              const text = [
+                element.innerText,
+                element.getAttribute('aria-label'),
+                element.getAttribute('title'),
+              ].join(' ').trim().toLowerCase();
+
+              if (
+                style.visibility === 'hidden' ||
+                style.display === 'none' ||
+                rect.width < 16 ||
+                rect.height < 16
+              ) {
+                return null;
+              }
+
+              const explicitClose = /plus tard|fermer|close|×/.test(text);
+              const topRightClose =
+                rect.top < dialog.rect.top + 72 &&
+                rect.left > dialog.rect.right - 96;
+              if (!explicitClose && !topRightClose) {
+                return null;
+              }
+
+              const score =
+                (explicitClose ? 1000 : 0) +
+                (topRightClose ? 500 : 0) -
+                Math.abs(rect.left + rect.width / 2 - dialog.rect.right);
+
+              return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, score };
+            })
+            .filter(Boolean)
+            .sort((a, b) => b.score - a.score);
+
+          return controls[0] || null;
+        }
+        """
+    )
+
+    if not coords:
+        return False
+
+    page.mouse.click(coords["x"], coords["y"])
+    return True
+
+
+def dismiss_known_blocking_dialogs(page: Page) -> None:
+    """Best-effort dismissal for dialogs that cover the pulls page."""
+
+    dismissed = False
+    for _ in range(2):
+        close_control = get_first_visible(
+            [
+                page.get_by_role("button", name=re.compile("^plus tard$", re.IGNORECASE)),
+                page.locator(
+                    'button:has-text("Plus tard"), '
+                    '[role="button"]:has-text("Plus tard"), '
+                    'a:has-text("Plus tard")'
+                ),
+                page.get_by_text("Plus tard", exact=True),
+            ],
+            timeout_ms=500,
+        )
+
+        try:
+            if close_control is not None:
+                close_control.click(timeout=1_000)
+            elif click_known_dialog_close_by_geometry(page):
+                pass
+            else:
+                break
+        except PlaywrightError:
+            break
+
+        dismissed = True
+        page.wait_for_timeout(300)
+
+    if dismissed:
+        log("Dismissed blocking dialog on pulls page.")
+
+
 def find_open_button(page: Page) -> Locator | None:
     return get_first_visible(
         [
             page.get_by_role("button", name=re.compile("^ouvrir$", re.IGNORECASE)),
+            page.locator(
+                'button:has-text("Ouvrir"), '
+                '[role="button"]:has-text("Ouvrir"), '
+                'a:has-text("Ouvrir")'
+            ),
             page.get_by_text("Ouvrir", exact=True),
         ],
         timeout_ms=2_000,
@@ -741,6 +866,7 @@ def open_all_available_packs(page: Page, records: list[CardRecord]) -> int:
     for pack_index in range(1, MAX_PACKS_PER_RUN + 1):
         page.goto(PULLS_URL, wait_until="domcontentloaded")
         settle_page(page)
+        dismiss_known_blocking_dialogs(page)
 
         open_button = find_open_button(page)
         if open_button is None:
@@ -755,7 +881,14 @@ def open_all_available_packs(page: Page, records: list[CardRecord]) -> int:
             pass
 
         log(f"Opening pack {pack_index} ({read_pack_status(page)}).")
-        open_button.click(timeout=5_000)
+        try:
+            open_button.click(timeout=5_000)
+        except PlaywrightError:
+            dismiss_known_blocking_dialogs(page)
+            open_button = find_open_button(page)
+            if open_button is None:
+                raise
+            open_button.click(timeout=5_000)
 
         opened += 1
         reveal_current_pack(page, pack_index, records)
